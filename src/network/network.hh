@@ -1,6 +1,6 @@
 // vim: set fileencoding=utf-8 foldmethod=marker :
 
-/* {{{ Copyright 2013-2019 Bas Wijnen <wijnen@debian.org>
+/* {{{ Copyright 2013-2023 Bas Wijnen <wijnen@debian.org>
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
 // published by the Free Software Foundation, either version 3 of the
@@ -104,12 +104,12 @@ def log(*message, filename = None, line = None, funcname = None, depth = 0): // 
 struct Item { // {{{
 	typedef bool (*Cb)(void *data);
 	void *data;
-	int index;
 	int fd;
 	short events;
 	Cb read;
 	Cb write;
 	Cb error;
+	int handle;
 }; // }}}
 
 struct PollItems { // {{{
@@ -357,13 +357,24 @@ def wrap(i, o = None): // {{{
 	return Socket(_Fake(i, o))
 // }}}*/
 
+typedef void (*ReadCb)(std::string &buffer);
 class Socket { // {{{
 	// Connection object.
 	int fd;
+	size_t maxsize;	// For read operations.
 	std::string (*disconnect_cb)(std::string const &pending, void *data);
 	void *disconnect_data;
-	int read_handle;
-	std::string linebuffer;
+	Item read_item;
+	ReadCb read_cb;
+	std::string buffer;
+	static bool read_impl(void *data) { // {{{
+		Socket *self = reinterpret_cast <Socket *>(data);
+		self->buffer += self->recv();
+		if (!read_cb)
+			return false;
+		self->read_cb(buffer);
+		return true;
+	} // }}}
 public:
 	// Read only address components; these are filled from address in the constructor.
 	// <protocol>://<hostname>:<service>[?/#]<extra>
@@ -487,9 +498,9 @@ public:
 		// @param data: line to send.  A newline is added.  This should be
 		//	 of type str.  The data is sent as utf-8.
 		send(data + "\n");
-	// }}}
-	def recv(self, maxsize = 4096): // {{{
-		'''Read data from the network.
+	} // }}}
+	std::string recv() { // {{{
+		/* Read data from the network.
 		Data is read from the network.  If the socket is not set to
 		non-blocking, this call will block if there is no data.  It
 		will return a short read if limited data is available.  The
@@ -500,44 +511,43 @@ public:
 			enabled, no data is left pending, which means that more
 			than maxsize bytes can be returned.
 		@return The received data as a bytes object.
-		'''
-		if self.socket is None:
-			log('recv on closed socket')
-			raise EOFError('recv on closed socket')
-		ret = b''
-		try:
-			ret = self.socket.recv(maxsize)
-			if hasattr(self.socket, 'pending'):
-				while self.socket.pending():
-					ret += self.socket.recv(maxsize)
-		except:
-			log('Error reading from socket: %s' % sys.exc_info()[1])
-			self.close()
-			return ret
-		if len(ret) == 0:
-			ret = self.close()
-			if not self._disconnect_cb:
-				raise EOFError('network connection closed')
-		return ret
-	// }}}
-	def rawread(self, callback, error = None): // {{{
-		'''Register function to be called when data is ready for reading.
+		*/
+		if (fd < 0) {
+			log("recv on closed socket");
+			throw "recv on closed socket";
+		}
+		char buffer[mymaxsize];
+		auto num = ::read(fd, buffer, mymaxsize);
+		if (num < 0) {
+			log("Error reading from socket");
+			return close();
+		}
+		if (num == 0) {
+			std::string ret = close();
+			if (!disconnect_cb)
+				throw "network connection closed";
+			return ret;
+		}
+		return std::string(buffer, num);
+	} // }}}
+	std::string rawread(Item::Cb cb, Item::Cb error = nullptr) { // {{{
+		/* Register function to be called when data is ready for reading.
 		The function will be called when data is ready.  The callback
 		must read the function or call unread(), or it will be called
 		again after returning.
 		@param callback: function to be called when data can be read.
 		@param error: function to be called if there is an error on the socket.
 		@return The data that was remaining in the line buffer, if any.
-		'''
-		if self.socket is None:
-			return b''
-		ret = self.unread()
-		self._callback = (callback, None)
-		self._event = add_read(self.socket, callback, error)
-		return ret
-	// }}}
-	def read(self, callback, error = None, maxsize = 4096): // {{{
-		'''Register function to be called when data is received.
+		*/
+		if (fd < 0)
+			return std::string();
+		std::string ret = unread();
+		read_item = Item {data, fd, POLLIN | POLLPRI, cb, nullptr, error};
+		read_item.poll_handle = add_io(read_item);
+		return ret;
+	} // }}}
+	void read(ReadCb callback, Item::Cb error = Item::Cb(), size_t maxsize = 4096) { // {{{
+		/* Register function to be called when data is received.
 		When data is available, read it and call this function.  The
 		data that was remaining in the line buffer, if any, is sent to
 		the callback immediately.
@@ -547,23 +557,31 @@ public:
 		socket.
 		@param maxsize: buffer size that is used for the recv call.
 		@return None.
-		'''
-		if self.socket is None:
-			return b''
-		first = self.unread()
-		self._maxsize = maxsize
-		self._callback = (callback, False)
-		def cb():
-			data = self.recv(self._maxsize)
-			//log('network read %d bytes' % len(data))
-			if not self._event:
-				return False
-			callback(data)
-			return True
-		self._event = add_read(self.socket, cb, error)
-		if first:
-			callback(first)
-	// }}}
+		*/
+		if (fd < 0)
+			return;
+		std::string first = self.unread();
+		mymaxsize = maxsize;
+		read_cb = callback;
+		rawread(read_impl, error);
+		if (!first.empty())
+			read_cb(first);
+	} // }}}
+	std::string unread(self) { // {{{
+		/* Cancel a read() or rawread() callback.
+		Cancel any read callback.
+		@return Bytes left in the line buffer, if any.  The line buffer
+			is cleared.
+		*/
+		if (read_item.handle >= 0) {
+			remove_io(read_item.handle);
+			read_item.handle = -1;
+		}
+		std::string ret = std::move(buffer);
+		buffer.clear();
+		return ret;
+	} // }}}
+#if 0
 	def readlines(self, callback, error = None, maxsize = 4096): // {{{
 		'''Buffer incoming data until a line is received, then call a function.
 		When a newline is received, all data up to that point is
@@ -598,25 +616,10 @@ public:
 				self._callback[0](data)
 		return True
 	// }}}
-	def unread(self): // {{{
-		'''Cancel a read() or rawread() callback.
-		Cancel any read callback.
-		@return Bytes left in the line buffer, if any.  The line buffer
-			is cleared.
-		'''
-		if self._event:
-			try:
-				remove_read(self._event)
-			except ValueError:
-				// The function already returned False.
-				pass
-			self._event = None
-		ret = self._linebuffer
-		self._linebuffer = b''
-		return ret
-	// }}}
-}; }}}
+#endif
+}; // }}}
 
+#if 0
 class Server: // {{{
 	'''Listen on a network port and accept connections.'''
 	def __init__(self, port, obj, address = '', backlog = 5, tls = False, disconnect_cb = None):
@@ -769,4 +772,5 @@ class Server: // {{{
 		self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 		self._tls_context.load_cert_chain(self._tls_cert, self._tls_key)
 // }}}
+#endif
 // }}}
