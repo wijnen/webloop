@@ -101,10 +101,13 @@ public:
 	typedef std::chrono::time_point <std::chrono::steady_clock> Time;
 	typedef std::chrono::steady_clock::duration Duration;
 	typedef bool (*Cb)(void *user_data);
+
 	struct IdleRecord {
 		Cb cb;
 		void *user_data;
 	};
+	typedef std::list <IdleRecord>::iterator IdleHandle;
+
 	struct TimeoutRecord {
 		Time time;
 		Duration interval;	// 0 for single shot.
@@ -112,6 +115,9 @@ public:
 		void *user_data;
 		bool operator<(TimeoutRecord const &other) const { return time < other.time; }
 	};
+	typedef std::set <TimeoutRecord>::iterator TimeoutHandle;
+
+	typedef int IoHandle;
 	// }}}
 
 private:
@@ -131,13 +137,13 @@ public:
 	void run();
 	void stop(bool force = false);
 
-	int add_io(Item &item) { return items.add(&item); }
-	std::set <TimeoutRecord>::iterator add_timeout(TimeoutRecord &&timeout) { return timeouts.insert(timeout).first; }
-	std::list <IdleRecord>::iterator add_idle(IdleRecord &&record) { idle.push_back(record); return --idle.end(); }
+	IoHandle add_io(Item &item) { return items.add(&item); }
+	TimeoutHandle add_timeout(TimeoutRecord &&timeout) { return timeouts.insert(timeout).first; }
+	IdleHandle add_idle(IdleRecord &&record) { idle.push_back(record); return --idle.end(); }
 
-	void remove_io(int handle) { items.remove(handle); }
-	void remove_timeout(std::set <TimeoutRecord>::iterator handle) { timeouts.erase(handle); }
-	void remove_idle(std::list <IdleRecord>::iterator handle) { idle.erase(handle); }
+	void remove_io(IoHandle handle) { items.remove(handle); }
+	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }
+	void remove_idle(IdleHandle handle) { idle.erase(handle); }
 }; // }}}
 // }}}
 

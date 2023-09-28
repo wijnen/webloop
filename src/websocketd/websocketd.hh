@@ -80,12 +80,17 @@ locally by using call().
 
 class Websocket { // {{{
 	// Main class implementing the websocket protocol.
+	Socket socket;
+	Loop::TimeoutHandle keepalive_handle;
+	Loop::Duration keepalive_interval;
+	bool is_closed;
+	bool pong;	// true if a pong was seen since last ping command.
 public:
 	struct Settings {
 		std::string method;	// default: GET
 		std::string user;	// if not empty, login name
 		std::string password;	// if not empty, login password
-		uint32_t mask;		// if not 0, mask
+		bool send_mask;		// whether masks are used to sent data.
 		Loop::Duration keepalive;	// keepalive timer.
 		std::map <std::string, std::string> headers;	// extra headers.
 		void *user_data;	// passed through to callback functions.
@@ -93,11 +98,11 @@ public:
 	Settings settings;
 	typedef void (*Receiver)(std::string const &data);
 	Websocket(std::string const &address, Receiver receiver, Settings const &settings);
-	def _websocket_keepalive(self):	# {{{
-		if not self._websocket_ping():
-			log('Warning: no keepalive reply received')
-		self._keepalive = add_timeout(time.time() + self._websocket_keepalive_time, self._websocket_keepalive)
-	# }}}
+	bool keepalive() { // {{{
+		if (!ping())
+			log("Warning: no keepalive reply received");
+		return true;
+	} // }}}
 	def _websocket_read(self, data, sync = False):	# {{{
 		# Websocket data consists of:
 		# 1 byte:
@@ -243,77 +248,73 @@ public:
 				log('invalid opcode')
 				self.socket.close()
 	# }}}
-	def _websocket_send(self, data, opcode = 1):	# Send a WebSocket frame.  {{{
-		'''Send a Websocket frame to the remote end of the connection.
+	void send(std::string const &data, int opcode = 1) {	// Send a WebSocket frame.  {{{
+		/* Send a Websocket frame to the remote end of the connection.
 		@param data: Data to send.
 		@param opcode: Opcade to send.  0 = fragment, 1 = text packet, 2 = binary packet, 8 = close request, 9 = ping, 10 = pong.
-		'''
-		if DEBUG > 3:
-			log('websend:' + repr(data))
-		assert opcode in(0, 1, 2, 8, 9, 10)
-		if self._is_closed:
-			return None
-		if opcode == 1:
-			data = data.encode('utf-8')
-		if self.mask[1]:
-			maskchar = 0x80
-			# Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this module).
-			mask = b'\0\0\0\0'
-		else:
+		*/
+		if (DEBUG > 3)
+			log("websend: " + data);
+		assert((opcode >= 0 && opcode <= 2) || (opcode >= 8 && opcode <=10));
+		if (is_closed)
+			return;
+		//if (opcode == 1)
+		//	data = data.encode('utf-8')
+		uint8_t maskchar;
+		union {
+			uint32_t l;
+			char c[4];
+		} mask;
+		mask.l = 0;
+		if (settings.send_mask) {
+			maskchar = 0x80;
+			// Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this module).
+			mask.l = 0;
+		}
+		else {
 			maskchar = 0
-			mask = b''
-		if len(data) < 126:
-			l = bytes((maskchar | len(data),))
-		elif len(data) < 1 << 16:
-			l = bytes((maskchar | 126,)) + struct.pack('!H', len(data))
-		else:
-			l = bytes((maskchar | 127,)) + struct.pack('!Q', len(data))
-		try:
+		}
+		std::string len;
+		size_t l = data.length();
+		if (l < 0x7e)
+			len = std::string(maskchar | l, 1);
+		else if (l < 1 << 16)
+			len = std::string((char[3]){maskchar | 0x7e, (l >> 8) & 0xff, l & 0xff}, 3);
+		else
+			len = std::string((char[5]){maskchar | 0x7f, (l >> 24) & 0xff, (l >> 16) & 0xff, (l >> 8) & 0xff, l & 0xff}, 5);
+		try {
 			self.socket.send(bytes((0x80 | opcode,)) + l + mask + data)
-		except:
-			# Something went wrong; close the socket(in case it wasn't yet).
-			if DEBUG > 0:
-				traceback.print_exc()
-			log('closing socket due to problem while sending.')
-			self.socket.close()
-		if opcode == 8:
-			self.socket.close()
-	# }}}
-	def _websocket_ping(self, data = b''): # Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong. {{{
-		'''Send a ping, return if a pong was received since last ping.
+		}
+		catch (char const *msg) {
+			// Something went wrong; close the socket(in case it wasn't yet).
+			log(std::string("closing socket due to problem while sending: ") + msg);
+			is_closed = true;
+			socket.close();
+		}
+		if (opcode == 8) {
+			is_closed = true;
+			socket.close();
+		}
+	} // }}}
+	bool ping(std::string const &data = std::string()) { // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong. {{{
+		/* Send a ping, return if a pong was received since last ping.
 		@param data: Data to send with the ping.
 		@return True if a pong was received since last ping, False if not.
-		'''
-		ret = self._pong
-		self._pong = False
-		self._websocket_send(data, opcode = 9)
-		return ret
-	# }}}
-	def _websocket_close(self):	# Close a WebSocket.  (Use self.socket.close for other connections.)  {{{
-		'''Send close request, and close the connection.
+		*/
+		bool ret = pong;
+		pong = false;
+		send(data, 9);
+		return ret;
+	} // }}}
+	void close() {	// Close a WebSocket.  (Use self.socket.close for other connections.)  {{{
+		/* Send close request, and close the connection.
 		@return None.
-		'''
-		self._websocket_send(b'', 8)
-		self.socket.close()
-	# }}}
-	def _websocket_opened(self): # {{{
-		'''This function does nothing by default, but can be overridden
-		by the application.  It is called when a new websocket is
-		opened.  As this happens from the constructor, it is useless to
-		override it in a Websocket object; it must be overridden in the
-		class.
-		@return None.
-		'''
-		pass
-	# }}}
-	def _websocket_closed(self): # {{{
-		'''This function does nothing by default, but can be overridden
-		by the application.  It is called when the websocket is closed.
-		@return None.
-		'''
-		pass
-	# }}}
-# }}}
+		*/
+		send(std::string(), 8);
+		is_closed = true;
+		socket.close();
+	} // }}}
+}; // }}}
 
 # Set of inactive websockets, and idle handle for _activate_all.
 _activation = [set(), None]
