@@ -79,12 +79,17 @@ locally by using call().
 //DEBUG = 0 if os.getenv('NODEBUG') else int(os.getenv('DEBUG', 1))
 
 class Websocket { // {{{
+public:
+	typedef void (*Receiver)(std::string const &data, void *user_data);
+private:
 	// Main class implementing the websocket protocol.
 	Socket socket;
+	std::string buffer;
+	std::string fragments;
 	Loop::TimeoutHandle keepalive_handle;
-	Loop::Duration keepalive_interval;
 	bool is_closed;
-	bool pong;	// true if a pong was seen since last ping command.
+	bool pong_seen;	// true if a pong was seen since last ping command.
+	Receiver receiver;
 public:
 	struct Settings {
 		std::string method;	// default: GET
@@ -96,158 +101,328 @@ public:
 		void *user_data;	// passed through to callback functions.
 	};
 	Settings settings;
-	typedef void (*Receiver)(std::string const &data);
-	Websocket(std::string const &address, Receiver receiver, Settings const &settings);
+	Websocket(std::string const &address, Receiver receiver, Settings const &settings) : // {{{
+			socket(address, this),
+			buffer(),
+			fragments(),
+			keepalive_handle(),
+			is_closed(true),
+			pong_seen(true),
+			receiver(receiver),
+			settings(settings)
+	{
+		/* When constructing a Websocket, a connection is made to the
+		requested port, and the websocket handshake is performed.  This
+		constructor passes any extra arguments to the network.Socket
+		constructor (if it is called), in particular "tls" can be used
+		to control the use of encryption.  There objects are also
+		created by the websockets server.  For that reason, there are
+		some arguments that should not be used when calling it
+		directly.
+		@param port: Host and port to connect to, same format as
+			python-network uses, or None for an incoming connection (internally used).
+		@param recv: Function to call when a data packet is received
+			asynchronously.
+		@param method: Connection method to use.
+		@param user: Username for authentication.  Only plain text
+			authentication is supported; this should only be used
+			over a link with TLS encryption.
+		@param password: Password for authentication.
+		@param extra: Extra headers to pass to the host.
+		@param socket: Existing socket to use for connection, or None
+			to create a new socket.
+		@param mask: Mostly for internal use by the server.  Flag
+			whether or not to send and receive masks.  (None, True)
+			is the default, which means to accept anything, and
+			send masked packets.  Note that the mask that is used
+			for sending is always (0,0,0,0), which is effectively
+			no mask.  It is sent to follow the protocol.  No real
+			mask is sent, because masks give a false sense of
+			security and provide no benefit.  The unmasking
+			implementation is rather slow.  When communicating
+			between two programs using this module, the non-mask is
+			detected and the unmasking step is skipped.
+		@param websockets: For interal use by the server.  A set to remove the socket from on disconnect.
+		@param data: For internal use by the server.  Data to pass through to callback functions.
+		@param real_remote: For internal use by the server.  Override detected remote.  Used to have proper remotes behind virtual proxy.
+		@param keepalive: Seconds between keepalive pings, or None to disable keepalive pings.
+		*/
+		self.recv = recv
+		self.mask = mask
+		self._websockets = websockets
+		self.websocket_buffer = b''
+		self.websocket_fragments = b''
+		self.opcode = None
+		self._is_closed = False
+		self._pong = True	# If false, we're waiting for a pong.
+		if socket is None:
+			socket = network.Socket(port, *a, **ka)
+		self.socket = socket
+		# Use real_remote if it was provided.
+		if real_remote:
+			if isinstance(socket.remote, (tuple, list)):
+				self.remote = [real_remote, socket.remote[1]]
+			else:
+				self.remote = [real_remote, None]
+		else:
+			self.remote = socket.remote
+		hdrdata = b''
+		if port is not None:
+			if isinstance(port, int):
+				port = 'localhost:%d' % port
+			elist = []
+			for e in extra:
+				elist.append('%s: %s\r\n' % (e, extra[e]))
+			if user is not None:
+				userpwd = user + ':' + password + '\r\n'
+			else:
+				userpwd = ''
+			p = re.match('^(?:([a-z0-9-]+)://)?([^:/?#]*)(?::([^:/?#]+))?([:/?#].*)?$', port)
+			# Group 1: protocol or None
+			# Group 2: hostname
+			# Group 3: port or None
+			# Group 4: everything after the port (address, query string, etc)
+			url = p.group(4)
+			if url is None:
+				url = '/'
+			elif not url.startswith('/'):
+				url = '/' + url
+			if p.group(3) is None:
+				host = p.group(2)
+			else:
+				host = p.group(2) + ':' + p.group(3)
+			# Sec-Websocket-Key is not random, because that has no
+			# value. The example value from the RFC is used.
+			# Differently put: it uses a special random generator
+			# which always returns range(0x01, 0x11).
+			socket.send(('''\
+%s %s HTTP/1.1\r
+Host: %s\r
+Upgrade: websocket\r
+Connection: Upgrade\r
+Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEC==\r
+Sec-WebSocket-Version: 13\r
+%s%s\r
+''' % (method, url, host, userpwd, ''.join(elist))).encode('utf-8'))
+			while b'\n' not in hdrdata:
+				r = socket.recv()
+				if r == b'':
+					raise EOFError('EOF while reading reply')
+				hdrdata += r
+			pos = hdrdata.index(b'\n')
+			if int(hdrdata[:pos].split()[1]) != 101:
+				log('Unexpected reply: %s' % hdrdata)
+				raise ValueError('wrong reply code')
+			hdrdata = hdrdata[pos + 1:]
+			data = {}
+			while True:
+				while b'\n' not in hdrdata:
+					r = socket.recv()
+					if len(r) == 0:
+						raise EOFError('EOF while reading reply')
+					hdrdata += r
+				pos = hdrdata.index(b'\n')
+				line = hdrdata[:pos].strip()
+				hdrdata = hdrdata[pos + 1:]
+				if len(line) == 0:
+					break
+				key, value = [x.strip() for x in line.decode('utf-8', 'replace').split(':', 1)]
+				data[key] = value
+		self.data = data
+		self.socket.read(self._websocket_read)
+		def disconnect(socket, data):
+			if not self._is_closed:
+				self._is_closed = True
+				if self._websockets is not None:
+					self._websockets.remove(self)
+				if self._keepalive is not None:
+					remove_timeout(self._keepalive)
+				call(None, self._websocket_closed)
+			return b''
+		if self._websockets is not None:
+			self._websockets.add(self)
+		self.socket.disconnect_cb(disconnect)
+		# Set up keepalive heartbeat.
+		self._websocket_keepalive_time = keepalive
+		if keepalive is not None:
+			self._keepalive = add_timeout(time.time() + keepalive, self._websocket_keepalive)
+		else:
+			self._keepalive = None
+		self._websocket_opened()
+		if len(hdrdata) > 0:
+			self._websocket_read(hdrdata)
+		if DEBUG > 2:
+			log('opened websocket')
+	} // }}}
 	bool keepalive() { // {{{
 		if (!ping())
 			log("Warning: no keepalive reply received");
 		return true;
 	} // }}}
-	def _websocket_read(self, data, sync = False):	# {{{
-		# Websocket data consists of:
-		# 1 byte:
-		#	bit 7: 1 for last (or only) fragment; 0 for other fragments.
-		#	bit 6-4: extension stuff; must be 0.
-		#	bit 3-0: opcode.
-		# 1 byte:
-		#	bit 7: 1 if masked, 0 otherwise.
-		#	bit 6-0: length or 126 or 127.
-		# If 126:
-		# 	2 bytes: length
-		# If 127:
-		#	8 bytes: length
-		# If masked:
-		#	4 bytes: mask
-		# length bytes: (masked) payload
+	static bool read(std::string &data, void *self_ptr) { // {{{
+		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
+		// Handle received data. Return bool to use as read callback.
+		// Websocket data consists of:
+		// 1 byte:
+		//	bit 7: 1 for last (or only) fragment; 0 for other fragments.
+		//	bit 6-4: extension stuff; must be 0.
+		//	bit 3-0: opcode.
+		// 1 byte:
+		//	bit 7: 1 if masked, 0 otherwise.
+		//	bit 6-0: length or 0x7e or 0x7f.
+		// If 0x7e:
+		// 	2 bytes: length
+		// If 0x7f:
+		//	8 bytes: length
+		// If masked:
+		//	4 bytes: mask
+		// length bytes: (masked) payload
 
-		#log('received: ' + repr(data))
-		if DEBUG > 2:
-			log('received %d bytes' % len(data))
-		if DEBUG > 3:
-			log('waiting: ' + ' '.join(['%02x' % x for x in self.websocket_buffer]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in self.websocket_buffer]))
-			log('data: ' + ' '.join(['%02x' % x for x in data]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in data]))
-		self.websocket_buffer += data
-		while len(self.websocket_buffer) > 0:
-			if self.websocket_buffer[0] & 0x70:
-				# Protocol error.
-				log('extension stuff %x, not supported!' % self.websocket_buffer[0])
-				self.socket.close()
-				return None
-			if len(self.websocket_buffer) < 2:
-				# Not enough data for length bytes.
-				if DEBUG > 2:
-					log('no length yet')
-				return None
-			b = self.websocket_buffer[1]
-			have_mask = bool(b & 0x80)
-			b &= 0x7f
-			if have_mask and self.mask[0] is True or not have_mask and self.mask[0] is False:
-				# Protocol error.
-				log('mask error')
-				self.socket.close()
-				return None
-			if b == 127:
-				if len(self.websocket_buffer) < 10:
-					# Not enough data for length bytes.
-					if DEBUG > 2:
-						log('no 4 length yet')
-					return None
-				l = struct.unpack('!Q', self.websocket_buffer[2:10])[0]
-				pos = 10
-			elif b == 126:
-				if len(self.websocket_buffer) < 4:
-					# Not enough data for length bytes.
-					if DEBUG > 2:
-						log('no 2 length yet')
-					return None
-				l = struct.unpack('!H', self.websocket_buffer[2:4])[0]
-				pos = 4
-			else:
-				l = b
-				pos = 2
-			if len(self.websocket_buffer) < pos + (4 if have_mask else 0) + l:
-				# Not enough data for packet.
-				if DEBUG > 2:
-					log('no packet yet(%d < %d)' % (len(self.websocket_buffer), pos + (4 if have_mask else 0) + l))
-				# Long packets should not cause ping timeouts.
-				self._pong = True
-				return None
-			header = self.websocket_buffer[:pos]
-			opcode = header[0] & 0xf
-			if have_mask:
-				mask = [x for x in self.websocket_buffer[pos:pos + 4]]
-				pos += 4
-				data = self.websocket_buffer[pos:pos + l]
-				# The following is slow!
-				# Don't do it if the mask is 0; this is always true if talking to another program using this module.
-				if mask != [0, 0, 0, 0]:
-					if have_numpy:
-						padding = 3 - (len(data) - 1) % 4
-						data_array = np.frombuffer(data + b'\0' * padding, dtype = np.int8).reshape((-1, 4))
-						data = (data_array ^ np.array(mask, dtype = np.int8).reshape((1, 4))).tobytes()
-						if padding > 0:
-							data = data[:-padding]
-					else:
-						data = bytes([x ^ mask[i & 3] for i, x in enumerate(data)])
-			else:
-				data = self.websocket_buffer[pos:pos + l]
-			self.websocket_buffer = self.websocket_buffer[pos + l:]
-			if self.opcode is None:
-				self.opcode = opcode
-			elif opcode != 0:
-				# Protocol error.
-				# Exception: pongs are sometimes sent asynchronously.
-				# Theoretically the packet can be fragmented, but that should never happen; asynchronous pongs seem to be a protocol violation anyway...
-				if opcode == 10:
-					# Pong.
-					self._pong = True
-				else:
-					log('invalid fragment')
-					self.socket.close()
-				return None
-			if (header[0] & 0x80) != 0x80:
-				# fragment found; not last.
-				self._pong = True
-				self.websocket_fragments += data
-				if DEBUG > 2:
-					log('fragment recorded')
-				return None
-			# Complete frame has been received.
-			data = self.websocket_fragments + data
-			self.websocket_fragments = b''
-			opcode = self.opcode
-			self.opcode = None
-			if opcode == 8:
-				# Connection close request.
-				self._websocket_close()
-				return None
-			elif opcode == 9:
-				# Ping.
-				self._websocket_send(data, 10)	# Pong
-			elif opcode == 10:
-				# Pong.
-				self._pong = True
-			elif opcode == 1:
-				# Text.
-				data = data.decode('utf-8', 'replace')
-				if sync:
-					return data
-				if self.recv:
-					self.recv(self, data)
-				else:
-					log('warning: ignoring incoming websocket frame')
-			elif opcode == 2:
-				# Binary.
-				if sync:
-					return data
-				if self.recv:
-					self.recv(self, data)
-				else:
-					log('warning: ignoring incoming websocket frame (binary)')
-			else:
-				log('invalid opcode')
-				self.socket.close()
-	# }}}
+		//log("received: " + data);
+		if (DEBUG > 2)
+			log(std::format("received {} bytes", data.length()));
+		if (DEBUG > 3) {
+			//log(std::format("waiting: ' + ' '.join(['%02x' % x for x in self.websocket_buffer]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in self.websocket_buffer]))
+			//log('data: ' + ' '.join(['%02x' % x for x in data]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in data]))
+		}
+		self->buffer += data;
+		while (!self->buffer.empty()) {
+			if (self->buffer[0] & 0x70) {
+				// Protocol error.
+				log(std::format("extension stuff {:x}, not supported!", self->buffer[0]));
+				self->is_closed = true;
+				self->socket.close();
+				return false;
+			}
+			// Check that entire packet is received. {{{
+			if (self->buffer.size() < 2) {
+				// Not enough data for length bytes.
+				if (DEBUG > 2)
+					log("no length yet");
+				return true;
+			}
+			char b = self->buffer[1];
+			bool have_mask = bool(b & 0x80);
+			b &= 0x7f;
+			if ((have_mask && self->settings.send_mask) || (!have_mask && !self->settings.send_mask)) {
+				// Protocol error.
+				log("mask error");
+				self->is_closed = true;
+				self->socket.close();
+				return false;
+			}
+			std::string::size_type pos;
+			std::string::size_type len = 0;
+			if (b == 0x7f) {
+				if (self->buffer.length() < 10) {
+					// Not enough data for length bytes.
+					if (DEBUG > 2)
+						log("no 10 length yet");
+					return true;
+				}
+				for (int i = 0; i < 8; ++i)
+					len |= self->buffer[2 + i] << (8 * (7 - i));
+				pos = 10;
+			}
+			else if (b == 0x7e) {
+				if (self->buffer.length() < 4) {
+					// Not enough data for length bytes.
+					if (DEBUG > 2)
+						log("no 4 length yet");
+					return true;
+				}
+				for (int i = 0; i < 2; ++i)
+					len |= self->buffer[2 + i] << (8 * (1 - i));
+				pos = 4;
+			}
+			else {
+				len = b;
+				pos = 2;
+			}
+			if (self->buffer.length() < pos + (have_mask ? 4 : 0) + len) {
+				// Not enough data for packet.
+				if (DEBUG > 2)
+					log("no packet yet");
+				// Long packets should not cause ping timeouts.
+				pong_seen = true;
+				return true;
+			}
+			// }}}
+			std::string header = self->buffer.substr(0, pos);
+			opcode = header[0] & 0xf;
+			std::string packet;
+			if (have_mask) {
+				uint32_t mask = *(reinterpret_cast <uint32_t *> (&self->buffer.data()[pos]));
+				pos += 4;
+				auto p = pos;
+				for (p = pos; p + 3 < self->buffer.size(); p += 4)
+					packet += std::string(*(reinterpret_cast <uint32_t const *> (&self->buffer.data()[p])) ^ mask, 4);
+				uint8_t m[4];
+				*reinterpret_cast <uint32_t *>(m) = mask;
+				for (int i = 0; p < self->buffer.size(); ++p, ++i)
+					packet += std::string(self->buffer.data()[p] ^ m[i], 1);
+			}
+			else {
+				packet = self->buffer.substr(pos, len);
+			}
+			self->buffer = self->buffer.substr(pos + len);
+			if (current_opcode < 0)
+				current_opcode = opcode;
+			else if (opcode != 0) {
+				// Protocol error.
+				// Exception: pongs are sometimes sent asynchronously.
+				// Theoretically the packet can be fragmented, but that should never happen; asynchronous pongs seem to be a protocol violation anyway...
+				if (opcode == 10) {
+					// Pong.
+					pong_seen = true;
+				}
+				else {
+					log("invalid fragment");
+					self->is_closed = true;
+					self->socket.close();
+					return false;
+				}
+				continue;
+			}
+			fragments += packet;
+			if ((header[0] & 0x80) != 0x80) {
+				// fragment found; not last.
+				pong_seen = true;
+				if (DEBUG > 2)
+					log("fragment recorded");
+				continue;
+			}
+			// Complete frame has been received.
+			packet = std::move(fragments);
+			fragments.clear();
+			opcode = current_opcode;
+			current_opcode = -1;
+			switch(opcode) {
+			case 8:
+				// Connection close request.
+				close();
+				return false;
+			case 9:
+				// Ping.
+				send(data, 10);	// Pong
+				break;
+			case 10:
+				// Pong.
+				pong_seen = true;
+				break;
+			case 1:	// Text.
+			case 2:	// Binary.
+				receiver(data, self->settings.user_data);
+				break;
+			default:
+				log("invalid opcode");
+				self->is_closed = true;
+				self->socket.close();
+				return false;
+			}
+		}
+		return true;
+	} // }}}
 	void send(std::string const &data, int opcode = 1) {	// Send a WebSocket frame.  {{{
 		/* Send a Websocket frame to the remote end of the connection.
 		@param data: Data to send.
@@ -261,15 +436,11 @@ public:
 		//if (opcode == 1)
 		//	data = data.encode('utf-8')
 		uint8_t maskchar;
-		union {
-			uint32_t l;
-			char c[4];
-		} mask;
-		mask.l = 0;
-		if (settings.send_mask) {
+		std::string maskcode;
+		if (self->settings.send_mask) {
 			maskchar = 0x80;
 			// Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this module).
-			mask.l = 0;
+			maskcode = std::string("\0\0\0\0", 4);
 		}
 		else {
 			maskchar = 0
@@ -280,10 +451,15 @@ public:
 			len = std::string(maskchar | l, 1);
 		else if (l < 1 << 16)
 			len = std::string((char[3]){maskchar | 0x7e, (l >> 8) & 0xff, l & 0xff}, 3);
-		else
-			len = std::string((char[5]){maskchar | 0x7f, (l >> 24) & 0xff, (l >> 16) & 0xff, (l >> 8) & 0xff, l & 0xff}, 5);
+		else {
+			char header[9];
+			header[0] = maskchar | 0x7f;
+			for (int i = 0; i < 8; ++i)
+				header[1 + i] = (l >> (8 * (7 - i))) & 0xff;
+			len = std::string(header, 9);
+		}
 		try {
-			self.socket.send(bytes((0x80 | opcode,)) + l + mask + data)
+			self.socket.send(bytes((0x80 | opcode,)) + len + mask + data)
 		}
 		catch (char const *msg) {
 			// Something went wrong; close the socket(in case it wasn't yet).
@@ -301,8 +477,8 @@ public:
 		@param data: Data to send with the ping.
 		@return True if a pong was received since last ping, False if not.
 		*/
-		bool ret = pong;
-		pong = false;
+		bool ret = pong_seen;
+		pong_seen = false;
 		send(data, 9);
 		return ret;
 	} // }}}
