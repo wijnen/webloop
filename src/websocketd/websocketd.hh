@@ -78,6 +78,14 @@ locally by using call().
 // * 5: Non-websocket data.
 //DEBUG = 0 if os.getenv('NODEBUG') else int(os.getenv('DEBUG', 1))
 
+std::string strip(std::string const &src, std::string const &chars = " \t\v\f") { // {{{
+	auto first = src.find_first_not_of(chars);
+	if (first == std::string::npos)
+		return std::string();
+	auto last = src.find_last_not_of(chars);
+	return src.substr(first, last - first + 1);
+} // }}}
+
 class Websocket { // {{{
 public:
 	typedef void (*Receiver)(std::string const &data, void *user_data);
@@ -89,27 +97,38 @@ private:
 	Loop::TimeoutHandle keepalive_handle;
 	bool is_closed;
 	bool pong_seen;	// true if a pong was seen since last ping command.
+	uint8_t current_opcode;
 	Receiver receiver;
 public:
 	struct Settings {
-		std::string method;	// default: GET
-		std::string user;	// if not empty, login name
-		std::string password;	// if not empty, login password
-		bool send_mask;		// whether masks are used to sent data.
-		Loop::Duration keepalive;	// keepalive timer.
+		std::string method;				// default: GET
+		std::string user;				// login name; if both this and password are empty: don't send them.
+		std::string password;				// login password
+		bool send_mask;					// whether masks are used to sent data.
+		Loop *loop;					// Main loop to use; usually nullptr, so the default is used.
+		Loop::Duration keepalive;			// keepalive timer.
 		std::map <std::string, std::string> headers;	// extra headers.
-		void *user_data;	// passed through to callback functions.
+		void *user_data;				// passed through to callback functions.
 	};
 	Settings settings;
+	std::map <std::string, std::string> headers;
+	static void disconnect(void *self_ptr) { // {{{
+		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
+		if (self->is_closed)
+			return;
+		self->is_closed = true;
+		Loop::get()->remove_timeout(self->keepalive_handle);
+	} // }}}
 	Websocket(std::string const &address, Receiver receiver, Settings const &settings) : // {{{
-			socket(address, this),
-			buffer(),
-			fragments(),
-			keepalive_handle(),
-			is_closed(true),
-			pong_seen(true),
-			receiver(receiver),
-			settings(settings)
+		socket(address, this),
+		buffer(),
+		fragments(),
+		keepalive_handle(),
+		is_closed(true),
+		pong_seen(true),
+		receiver(receiver),
+		settings(settings),
+		headers()
 	{
 		/* When constructing a Websocket, a connection is made to the
 		requested port, and the websocket handshake is performed.  This
@@ -147,115 +166,99 @@ public:
 		@param real_remote: For internal use by the server.  Override detected remote.  Used to have proper remotes behind virtual proxy.
 		@param keepalive: Seconds between keepalive pings, or None to disable keepalive pings.
 		*/
-		self.recv = recv
-		self.mask = mask
-		self._websockets = websockets
-		self.websocket_buffer = b''
-		self.websocket_fragments = b''
-		self.opcode = None
-		self._is_closed = False
-		self._pong = True	# If false, we're waiting for a pong.
-		if socket is None:
-			socket = network.Socket(port, *a, **ka)
-		self.socket = socket
-		# Use real_remote if it was provided.
-		if real_remote:
+		// Use real_remote if it was provided.
+		/*if (settings.real_remote.empty()) {
 			if isinstance(socket.remote, (tuple, list)):
 				self.remote = [real_remote, socket.remote[1]]
 			else:
 				self.remote = [real_remote, None]
 		else:
-			self.remote = socket.remote
-		hdrdata = b''
-		if port is not None:
-			if isinstance(port, int):
-				port = 'localhost:%d' % port
-			elist = []
-			for e in extra:
-				elist.append('%s: %s\r\n' % (e, extra[e]))
-			if user is not None:
-				userpwd = user + ':' + password + '\r\n'
-			else:
-				userpwd = ''
-			p = re.match('^(?:([a-z0-9-]+)://)?([^:/?#]*)(?::([^:/?#]+))?([:/?#].*)?$', port)
-			# Group 1: protocol or None
-			# Group 2: hostname
-			# Group 3: port or None
-			# Group 4: everything after the port (address, query string, etc)
-			url = p.group(4)
-			if url is None:
-				url = '/'
-			elif not url.startswith('/'):
-				url = '/' + url
-			if p.group(3) is None:
-				host = p.group(2)
-			else:
-				host = p.group(2) + ':' + p.group(3)
-			# Sec-Websocket-Key is not random, because that has no
-			# value. The example value from the RFC is used.
-			# Differently put: it uses a special random generator
-			# which always returns range(0x01, 0x11).
-			socket.send(('''\
-%s %s HTTP/1.1\r
-Host: %s\r
-Upgrade: websocket\r
-Connection: Upgrade\r
-Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEC==\r
-Sec-WebSocket-Version: 13\r
-%s%s\r
-''' % (method, url, host, userpwd, ''.join(elist))).encode('utf-8'))
-			while b'\n' not in hdrdata:
-				r = socket.recv()
-				if r == b'':
-					raise EOFError('EOF while reading reply')
-				hdrdata += r
-			pos = hdrdata.index(b'\n')
-			if int(hdrdata[:pos].split()[1]) != 101:
-				log('Unexpected reply: %s' % hdrdata)
-				raise ValueError('wrong reply code')
-			hdrdata = hdrdata[pos + 1:]
-			data = {}
-			while True:
-				while b'\n' not in hdrdata:
-					r = socket.recv()
-					if len(r) == 0:
-						raise EOFError('EOF while reading reply')
-					hdrdata += r
-				pos = hdrdata.index(b'\n')
-				line = hdrdata[:pos].strip()
-				hdrdata = hdrdata[pos + 1:]
-				if len(line) == 0:
-					break
-				key, value = [x.strip() for x in line.decode('utf-8', 'replace').split(':', 1)]
-				data[key] = value
-		self.data = data
-		self.socket.read(self._websocket_read)
-		def disconnect(socket, data):
-			if not self._is_closed:
-				self._is_closed = True
-				if self._websockets is not None:
-					self._websockets.remove(self)
-				if self._keepalive is not None:
-					remove_timeout(self._keepalive)
-				call(None, self._websocket_closed)
-			return b''
-		if self._websockets is not None:
-			self._websockets.add(self)
-		self.socket.disconnect_cb(disconnect)
-		# Set up keepalive heartbeat.
-		self._websocket_keepalive_time = keepalive
-		if keepalive is not None:
-			self._keepalive = add_timeout(time.time() + keepalive, self._websocket_keepalive)
-		else:
-			self._keepalive = None
-		self._websocket_opened()
-		if len(hdrdata) > 0:
-			self._websocket_read(hdrdata)
-		if DEBUG > 2:
-			log('opened websocket')
+			self.remote = socket.remote}*/
+		std::string extra_headers;
+		for (auto e: settings.headers)
+			extra_headers += e.first + ": " + e.second + "\r\n";
+		std::string userpwd;
+		if (!settings.user.empty() || !settings.password.empty())
+			userpwd = settings.user + ":" + password + "\r\n";
+		std::string url = socket.extra;
+		if (url.empty())
+			url = "/";
+		else if (url[0] != '/')
+			url = "/" + url;
+		std::string host = socket.hostname;
+		if (socket.service != socket.protocol)
+			host += ":" + socket.service;
+		// Sec-Websocket-Key is not random, because that has no
+		// value. The example value from the RFC is used.
+		// Differently put: it uses a special random generator
+		// which always returns range(0x01, 0x11).
+		socket.send(
+			settings.method + " " + url + " HTTP/1.1\r\n"
+			"Host: " + host + "\r\n"
+			"Upgrade: websocket\r\n"
+			"Connection: Upgrade\r\n"
+			"Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEC==\r\n"
+			"Sec-WebSocket-Version: 13\r\n" +
+			userpwd +
+			extra_headers +
+			"\r\n");
+		std::string hdrdata;
+		std::string::size_type pos;
+		while (true) {
+			pos = hdrdata.find("\n");
+			if (pos != std::string::npos)
+				break;
+			std::string r = socket.recv();	// FIXME: this should not be a blocking call.
+			if (r.empty())
+				throw "EOF while reading reply";
+			hdrdata += r;
+		}
+		std::istringstream firstline(hdrdata.substr(0, pos));
+		std::string namecode;
+		int numcode;
+		firstline >> namecode >> numcode;
+		if (numcode != 101) {
+			log(std::format("Unexpected reply: {}", hdrdataa));
+			throw "wrong reply code";
+		}
+		hdrdata = hdrdata.substr(pos + 1);
+		while (true) {
+			pos = hdrdata.find("\n");
+			if (pos == std::string::npos) {
+				std::string r = socket.recv();	// FIXME: this should not be a blocking call.
+				if (r.empty())
+					throw "EOF while reading reply";
+				hdrdata += r;
+				continue;
+			}
+			std::string line = hdrdata.substr(0, pos);
+			hdrdata = hdrdata.substr(pos + 1);
+			if (line.empty())
+				break;
+			std::string::size_type sep = line.find(":");
+			if (sep == std::string::npos) {
+				log("invalid header line");
+				throw "invalid header line";
+			}
+			std::string key = line.substr(0, sep);
+			std::string value = line.substr(sep + 1);
+			headers[strip(key)] = strip(value);
+		}
+		socket.read(read, nullptr, settings.loop);
+		disconnect_cb(this);
+		// Set up keepalive heartbeat.
+		if (settings.keepalive) {
+			Loop *loop = Loop::get(settings.loop);
+			keepalive_handle = loop->add_timeout(loop->now() + settings.keepalive, settings.keepalive, keepalive);
+		}
+		if (!hdrdata.empty())
+			read(hdrdata, this)
+		if (DEBUG > 2)
+			log("opened websocket");
 	} // }}}
-	bool keepalive() { // {{{
-		if (!ping())
+	static bool keepalive(void *self_ptr) { // {{{
+		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
+		if (!self->ping())
 			log("Warning: no keepalive reply received");
 		return true;
 	} // }}}
@@ -349,7 +352,7 @@ Sec-WebSocket-Version: 13\r
 			}
 			// }}}
 			std::string header = self->buffer.substr(0, pos);
-			opcode = header[0] & 0xf;
+			uint8_t opcode = header[0] & 0xf;
 			std::string packet;
 			if (have_mask) {
 				uint32_t mask = *(reinterpret_cast <uint32_t *> (&self->buffer.data()[pos]));
@@ -492,11 +495,15 @@ Sec-WebSocket-Version: 13\r
 	} // }}}
 }; // }}}
 
-# Set of inactive websockets, and idle handle for _activate_all.
+// Set of inactive websockets, and idle handle for _activate_all.
 _activation = [set(), None]
 
-def call(reply, target, *a, **ka): # {{{
-	'''Make a call to a function or generator.
+struct ObjectBase {};
+typedef std::vector <std::shared_ptr <ObjectBase> > Args;
+typedef std::map <std::string, std::shared_ptr <ObjectBase> > KwArgs;
+typedef std::shared_ptr <ObjectBase> (*ReplyCb)(Args args, KwArgs kwargs);
+void call(ReplyCb reply, std::string const &target, Args args, KwArgs kwargs) { // {{{
+	/* Make a call to a function or generator.
 	If target is a generator, the call will return when it finishes.
 	Yielded values are ignored.  Extra arguments are passed to target.
 	@param reply: Function to call with return value when it is ready, or
@@ -505,7 +512,7 @@ def call(reply, target, *a, **ka): # {{{
 	@param a: Arguments that are passed to target.
 	@param ka: Keyword arguments that are passed to target.
 	@return None.
-	'''
+	*/
 	ret = target(*a, **ka)
 	if type(ret) is not RPC._generatortype:
 		if reply is not None:
@@ -522,7 +529,7 @@ def call(reply, target, *a, **ka): # {{{
 	wake()
 	# Send it its wakeup function.
 	wake(wake)
-# }}}
+} // }}}
 
 class RPC(Websocket): # {{{
 	'''Remote Procedure Call over Websocket.
