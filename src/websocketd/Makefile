@@ -1,7 +1,9 @@
-all: coroutine.elf
+all: rpc-test.elf
 
-%.elf: %.o
-	g++ -Wall -Wextra -std=c++23 -ggdb3 $^ -o $@
+FLAGS = -Wall -Wextra -I../network -I../fhs -std=c++23 -ggdb3
 
-%.o: %.cc
-	g++ -Wall -Wextra -std=c++23 -ggdb3 -c $< -o $@
+%.elf: %.o coroutine.o webobject.o
+	g++ ${FLAGS} $^ -o $@
+
+%.o: %.cc coroutine.hh webobject.hh
+	g++ ${FLAGS} -c $< -o $@
