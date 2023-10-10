@@ -492,10 +492,10 @@ static Fhs::OptArg maybe_short(char opt) {
 		if (o->args.shortopt == opt)
 			return {};
 	}
-	return {.shortopt = opt};
+	return {.shortopt = opt, .multiple = false, .module_name = {}};
 }
 
-Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename, bool system, bool game) { // {{{
+Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename) { // {{{
 	/**Initialize the module.
 	This function must be called before any other in this module (except
 	option definitions and module_init(), which must be called before this

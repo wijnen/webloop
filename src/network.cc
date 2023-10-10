@@ -34,7 +34,6 @@ sockets.  Connection targets can be specified in several ways.
 */
 // }}}
 
-#include "network.hh"
 #include <cassert>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -42,7 +41,8 @@ sockets.  Connection targets can be specified in several ways.
 #include <sys/types.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include "../websocketd/webobject.hh"
+#include "webobject.hh"
+#include "network.hh"
 
 /* {{{ Interface description
 // - connection setup
@@ -405,7 +405,7 @@ void Socket::send(std::string const &data) { // {{{
 	*/
 	if (fd < 0)
 		return;
-	log("Sending: " + WebString(data).dump());
+	//log("Sending: " + WebString(data).dump());
 	size_t p = 0;
 	while (p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);

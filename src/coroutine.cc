@@ -4,10 +4,10 @@ std::shared_ptr <WebObject> coroutine::activate(coroutine::handle_type *handle, 
 	STARTFUNC;
 	if (handle->done())
 		return handle->promise().from_coroutine;
-	if (to_coroutine)
-		std::cerr << "to coroutine: " << to_coroutine->print() << std::endl;
-	else
-		std::cerr << "no to coroutine" << std::endl;
+	//if (to_coroutine)
+	//	std::cerr << "to coroutine: " << to_coroutine->print() << std::endl;
+	//else
+	//	std::cerr << "no to coroutine" << std::endl;
 	handle->promise().to_coroutine = to_coroutine;
 	(*handle)();
 	if (handle->done())
@@ -21,10 +21,10 @@ std::shared_ptr <WebObject> YieldAwaiter::await_resume() { // {{{
 	STARTFUNC;
 	std::shared_ptr <WebObject> ret;
 	promise->to_coroutine.swap(ret);
-	if (ret)
-		std::cerr << "resuming with result: " << ret->print() << std::endl;
-	else
-		std::cerr << "resuming with no result." << std::endl;
+	//if (ret)
+	//	std::cerr << "resuming with result: " << ret->print() << std::endl;
+	//else
+	//	std::cerr << "resuming with no result." << std::endl;
 	return ret;
 } // }}}
 

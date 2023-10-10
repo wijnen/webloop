@@ -210,7 +210,7 @@ struct Fhs {
 	typedef void (*generic_cb)(void *arg);
 	// }}}
 
-	Fhs(char **argv, std::string const &help = std::string(), std::string const &version = std::string(), std::string const &contact = std::string(), std::string const &packagename = std::string(), bool system = false, bool game = false);
+	Fhs(char **argv, std::string const &help = std::string(), std::string const &version = std::string(), std::string const &contact = std::string(), std::string const &packagename = std::string());
 	static void atinit(generic_cb target, void *data);
 
 	// Configuration files. {{{

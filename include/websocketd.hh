@@ -1,7 +1,4 @@
-# Python module for serving WebSockets and web pages.
-# vim: set fileencoding=utf-8 foldmethod=marker :
-
-# {{{ Copyright 2013-2016 Bas Wijnen <wijnen@debian.org>
+/* {{{ Copyright 2013-2023 Bas Wijnen <wijnen@debian.org>
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
 # published by the Free Software Foundation, either version 3 of the
@@ -14,9 +11,9 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-# }}}
+# }}} */
 
-# Documentation. {{{
+/* Documentation. {{{
 '''@mainpage
 This module can be used to create websockets servers and clients.  A websocket
 client is an HTTP connection which uses the headers to initiate a protocol
@@ -67,449 +64,66 @@ the called procedures to be generators, so they can yield control to the main
 program and continue running when they need to.  This system can also be used
 locally by using call().
 '''
-# }}}
+# }}} */
 
-# See the example server for how to use this module.
+// includes.  {{{
+#include <string>
+#include <map>
+#include <vector>
+#include "network.hh"
+#include "webobject.hh"
+#include "coroutine.hh"
+// }}}
 
-# imports.  {{{
-import network
-from network import endloop, log, set_log_output, add_read, add_write, add_timeout, add_idle, remove_read, remove_write, remove_timeout, remove_idle
-import os
-import re
-import sys
-import base64
-import hashlib
-import struct
-import json
-import tempfile
-import time
-import traceback
-from urllib.parse import urlparse, parse_qs, unquote
-from http.client import responses as httpcodes
-try:
-	import numpy as np
-	have_numpy = True
-except ImportError:
-	have_numpy = False
-# }}}
+// Debug level, set from DEBUG environment variable. (TODO)
+// * 0: No debugging (default).
+// * 1: Tracebacks on errors.
+// * 2: Incoming and outgoing RPC packets.
+// * 3: Incomplete packet information.
+// * 4: All incoming and outgoing data.
+// * 5: Non-websocket data.
+extern int DEBUG;
 
-#def tracer(a, b, c):
-#	print('trace: %s:%d:\t%s' % (a.f_code.co_filename, a.f_code.co_firstlineno, a.f_code.co_name))
-#
-#sys.settrace(tracer)
+std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
 
-## Debug level, set from DEBUG environment variable.
-# * 0: No debugging (default).
-# * 1: Tracebacks on errors.
-# * 2: Incoming and outgoing RPC packets.
-# * 3: Incomplete packet information.
-# * 4: All incoming and outgoing data.
-# * 5: Non-websocket data.
-DEBUG = 0 if os.getenv('NODEBUG') else int(os.getenv('DEBUG', 1))
+class Websocket { // {{{
+public:
+	typedef void (*Receiver)(std::string const &data, void *user_data);
+private:
+	// Main class implementing the websocket protocol.
+	Socket socket;
+	std::string buffer;
+	std::string fragments;
+	Loop::TimeoutHandle keepalive_handle;
+	bool is_closed;
+	bool pong_seen;	// true if a pong was seen since last ping command.
+	uint8_t current_opcode;
+	Receiver receiver;
+	bool send_mask;		// whether masks are used to sent data (true for client, false for server).
+	void *user_data;				// passed through to callback functions.
+public:
+	struct Settings {
+		std::string method;				// default: GET
+		std::string user;				// login name; if both this and password are empty: don't send them.
+		std::string password;				// login password
+		Loop *loop;					// Main loop to use; usually nullptr, so the default is used.
+		Loop::Duration keepalive;			// keepalive timer.
+		std::map <std::string, std::string> headers;	// extra headers.
+	};
+	Settings settings;
+	std::map <std::string, std::string> headers;
+	static void disconnect(void *self_ptr);
+	Websocket(std::string const &address, Receiver receiver, Settings const &settings, void *user_data);
+	Websocket(int socket_fd, Receiver receiver, Settings const &settings, void *user_data);
+	static bool keepalive(void *self_ptr);
+	static void read(std::string &data, void *self_ptr);
+	void send(std::string const &data, int opcode = 1); // Send a WebSocket frame.
+	bool ping(std::string const &data = std::string()); // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong.
+	void close(); // Close a WebSocket.  (Use socket.close for other connections.)
+}; // }}}
 
-class Websocket: # {{{
-	'''Main class implementing the websocket protocol.
-	'''
-	def __init__(self, port, recv = None, method = 'GET', user = None, password = None, extra = {}, socket = None, mask = (None, True), websockets = None, data = None, real_remote = None, keepalive = 50, *a, **ka): # {{{
-		'''When constructing a Websocket, a connection is made to the
-		requested port, and the websocket handshake is performed.  This
-		constructor passes any extra arguments to the network.Socket
-		constructor (if it is called), in particular "tls" can be used
-		to control the use of encryption.  There objects are also
-		created by the websockets server.  For that reason, there are
-		some arguments that should not be used when calling it
-		directly.
-		@param port: Host and port to connect to, same format as
-			python-network uses, or None for an incoming connection (internally used).
-		@param recv: Function to call when a data packet is received
-			asynchronously.
-		@param method: Connection method to use.
-		@param user: Username for authentication.  Only plain text
-			authentication is supported; this should only be used
-			over a link with TLS encryption.
-		@param password: Password for authentication.
-		@param extra: Extra headers to pass to the host.
-		@param socket: Existing socket to use for connection, or None
-			to create a new socket.
-		@param mask: Mostly for internal use by the server.  Flag
-			whether or not to send and receive masks.  (None, True)
-			is the default, which means to accept anything, and
-			send masked packets.  Note that the mask that is used
-			for sending is always (0,0,0,0), which is effectively
-			no mask.  It is sent to follow the protocol.  No real
-			mask is sent, because masks give a false sense of
-			security and provide no benefit.  The unmasking
-			implementation is rather slow.  When communicating
-			between two programs using this module, the non-mask is
-			detected and the unmasking step is skipped.
-		@param websockets: For interal use by the server.  A set to remove the socket from on disconnect.
-		@param data: For internal use by the server.  Data to pass through to callback functions.
-		@param real_remote: For internal use by the server.  Override detected remote.  Used to have proper remotes behind virtual proxy.
-		@param keepalive: Seconds between keepalive pings, or None to disable keepalive pings.
-		'''
-		self.recv = recv
-		self.mask = mask
-		self._websockets = websockets
-		self.websocket_buffer = b''
-		self.websocket_fragments = b''
-		self.opcode = None
-		self._is_closed = False
-		self._pong = True	# If false, we're waiting for a pong.
-		if socket is None:
-			socket = network.Socket(port, *a, **ka)
-		self.socket = socket
-		# Use real_remote if it was provided.
-		if real_remote:
-			if isinstance(socket.remote, (tuple, list)):
-				self.remote = [real_remote, socket.remote[1]]
-			else:
-				self.remote = [real_remote, None]
-		else:
-			self.remote = socket.remote
-		hdrdata = b''
-		if port is not None:
-			if isinstance(port, int):
-				port = 'localhost:%d' % port
-			elist = []
-			for e in extra:
-				elist.append('%s: %s\r\n' % (e, extra[e]))
-			if user is not None:
-				userpwd = user + ':' + password + '\r\n'
-			else:
-				userpwd = ''
-			p = re.match('^(?:([a-z0-9-]+)://)?([^:/?#]*)(?::([^:/?#]+))?([:/?#].*)?$', port)
-			# Group 1: protocol or None
-			# Group 2: hostname
-			# Group 3: port or None
-			# Group 4: everything after the port (address, query string, etc)
-			url = p.group(4)
-			if url is None:
-				url = '/'
-			elif not url.startswith('/'):
-				url = '/' + url
-			if p.group(3) is None:
-				host = p.group(2)
-			else:
-				host = p.group(2) + ':' + p.group(3)
-			# Sec-Websocket-Key is not random, because that has no
-			# value. The example value from the RFC is used.
-			# Differently put: it uses a special random generator
-			# which always returns range(0x01, 0x11).
-			socket.send(('''\
-%s %s HTTP/1.1\r
-Host: %s\r
-Upgrade: websocket\r
-Connection: Upgrade\r
-Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEC==\r
-Sec-WebSocket-Version: 13\r
-%s%s\r
-''' % (method, url, host, userpwd, ''.join(elist))).encode('utf-8'))
-			while b'\n' not in hdrdata:
-				r = socket.recv()
-				if r == b'':
-					raise EOFError('EOF while reading reply')
-				hdrdata += r
-			pos = hdrdata.index(b'\n')
-			if int(hdrdata[:pos].split()[1]) != 101:
-				log('Unexpected reply: %s' % hdrdata)
-				raise ValueError('wrong reply code')
-			hdrdata = hdrdata[pos + 1:]
-			data = {}
-			while True:
-				while b'\n' not in hdrdata:
-					r = socket.recv()
-					if len(r) == 0:
-						raise EOFError('EOF while reading reply')
-					hdrdata += r
-				pos = hdrdata.index(b'\n')
-				line = hdrdata[:pos].strip()
-				hdrdata = hdrdata[pos + 1:]
-				if len(line) == 0:
-					break
-				key, value = [x.strip() for x in line.decode('utf-8', 'replace').split(':', 1)]
-				data[key] = value
-		self.data = data
-		self.socket.read(self._websocket_read)
-		def disconnect(socket, data):
-			if not self._is_closed:
-				self._is_closed = True
-				if self._websockets is not None:
-					self._websockets.remove(self)
-				if self._keepalive is not None:
-					remove_timeout(self._keepalive)
-				call(None, self._websocket_closed)
-			return b''
-		if self._websockets is not None:
-			self._websockets.add(self)
-		self.socket.disconnect_cb(disconnect)
-		# Set up keepalive heartbeat.
-		self._websocket_keepalive_time = keepalive
-		if keepalive is not None:
-			self._keepalive = add_timeout(time.time() + keepalive, self._websocket_keepalive)
-		else:
-			self._keepalive = None
-		self._websocket_opened()
-		if len(hdrdata) > 0:
-			self._websocket_read(hdrdata)
-		if DEBUG > 2:
-			log('opened websocket')
-	# }}}
-	def _websocket_keepalive(self):	# {{{
-		if not self._websocket_ping():
-			log('Warning: no keepalive reply received')
-		self._keepalive = add_timeout(time.time() + self._websocket_keepalive_time, self._websocket_keepalive)
-	# }}}
-	def _websocket_read(self, data, sync = False):	# {{{
-		# Websocket data consists of:
-		# 1 byte:
-		#	bit 7: 1 for last (or only) fragment; 0 for other fragments.
-		#	bit 6-4: extension stuff; must be 0.
-		#	bit 3-0: opcode.
-		# 1 byte:
-		#	bit 7: 1 if masked, 0 otherwise.
-		#	bit 6-0: length or 126 or 127.
-		# If 126:
-		# 	2 bytes: length
-		# If 127:
-		#	8 bytes: length
-		# If masked:
-		#	4 bytes: mask
-		# length bytes: (masked) payload
-
-		#log('received: ' + repr(data))
-		if DEBUG > 2:
-			log('received %d bytes' % len(data))
-		if DEBUG > 3:
-			log('waiting: ' + ' '.join(['%02x' % x for x in self.websocket_buffer]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in self.websocket_buffer]))
-			log('data: ' + ' '.join(['%02x' % x for x in data]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in data]))
-		self.websocket_buffer += data
-		while len(self.websocket_buffer) > 0:
-			if self.websocket_buffer[0] & 0x70:
-				# Protocol error.
-				log('extension stuff %x, not supported!' % self.websocket_buffer[0])
-				self.socket.close()
-				return None
-			if len(self.websocket_buffer) < 2:
-				# Not enough data for length bytes.
-				if DEBUG > 2:
-					log('no length yet')
-				return None
-			b = self.websocket_buffer[1]
-			have_mask = bool(b & 0x80)
-			b &= 0x7f
-			if have_mask and self.mask[0] is True or not have_mask and self.mask[0] is False:
-				# Protocol error.
-				log('mask error')
-				self.socket.close()
-				return None
-			if b == 127:
-				if len(self.websocket_buffer) < 10:
-					# Not enough data for length bytes.
-					if DEBUG > 2:
-						log('no 4 length yet')
-					return None
-				l = struct.unpack('!Q', self.websocket_buffer[2:10])[0]
-				pos = 10
-			elif b == 126:
-				if len(self.websocket_buffer) < 4:
-					# Not enough data for length bytes.
-					if DEBUG > 2:
-						log('no 2 length yet')
-					return None
-				l = struct.unpack('!H', self.websocket_buffer[2:4])[0]
-				pos = 4
-			else:
-				l = b
-				pos = 2
-			if len(self.websocket_buffer) < pos + (4 if have_mask else 0) + l:
-				# Not enough data for packet.
-				if DEBUG > 2:
-					log('no packet yet(%d < %d)' % (len(self.websocket_buffer), pos + (4 if have_mask else 0) + l))
-				# Long packets should not cause ping timeouts.
-				self._pong = True
-				return None
-			header = self.websocket_buffer[:pos]
-			opcode = header[0] & 0xf
-			if have_mask:
-				mask = [x for x in self.websocket_buffer[pos:pos + 4]]
-				pos += 4
-				data = self.websocket_buffer[pos:pos + l]
-				# The following is slow!
-				# Don't do it if the mask is 0; this is always true if talking to another program using this module.
-				if mask != [0, 0, 0, 0]:
-					if have_numpy:
-						padding = 3 - (len(data) - 1) % 4
-						data_array = np.frombuffer(data + b'\0' * padding, dtype = np.int8).reshape((-1, 4))
-						data = (data_array ^ np.array(mask, dtype = np.int8).reshape((1, 4))).tobytes()
-						if padding > 0:
-							data = data[:-padding]
-					else:
-						data = bytes([x ^ mask[i & 3] for i, x in enumerate(data)])
-			else:
-				data = self.websocket_buffer[pos:pos + l]
-			self.websocket_buffer = self.websocket_buffer[pos + l:]
-			if self.opcode is None:
-				self.opcode = opcode
-			elif opcode != 0:
-				# Protocol error.
-				# Exception: pongs are sometimes sent asynchronously.
-				# Theoretically the packet can be fragmented, but that should never happen; asynchronous pongs seem to be a protocol violation anyway...
-				if opcode == 10:
-					# Pong.
-					self._pong = True
-				else:
-					log('invalid fragment')
-					self.socket.close()
-				return None
-			if (header[0] & 0x80) != 0x80:
-				# fragment found; not last.
-				self._pong = True
-				self.websocket_fragments += data
-				if DEBUG > 2:
-					log('fragment recorded')
-				return None
-			# Complete frame has been received.
-			data = self.websocket_fragments + data
-			self.websocket_fragments = b''
-			opcode = self.opcode
-			self.opcode = None
-			if opcode == 8:
-				# Connection close request.
-				self._websocket_close()
-				return None
-			elif opcode == 9:
-				# Ping.
-				self._websocket_send(data, 10)	# Pong
-			elif opcode == 10:
-				# Pong.
-				self._pong = True
-			elif opcode == 1:
-				# Text.
-				data = data.decode('utf-8', 'replace')
-				if sync:
-					return data
-				if self.recv:
-					self.recv(self, data)
-				else:
-					log('warning: ignoring incoming websocket frame')
-			elif opcode == 2:
-				# Binary.
-				if sync:
-					return data
-				if self.recv:
-					self.recv(self, data)
-				else:
-					log('warning: ignoring incoming websocket frame (binary)')
-			else:
-				log('invalid opcode')
-				self.socket.close()
-	# }}}
-	def _websocket_send(self, data, opcode = 1):	# Send a WebSocket frame.  {{{
-		'''Send a Websocket frame to the remote end of the connection.
-		@param data: Data to send.
-		@param opcode: Opcade to send.  0 = fragment, 1 = text packet, 2 = binary packet, 8 = close request, 9 = ping, 10 = pong.
-		'''
-		if DEBUG > 3:
-			log('websend:' + repr(data))
-		assert opcode in(0, 1, 2, 8, 9, 10)
-		if self._is_closed:
-			return None
-		if opcode == 1:
-			data = data.encode('utf-8')
-		if self.mask[1]:
-			maskchar = 0x80
-			# Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this module).
-			mask = b'\0\0\0\0'
-		else:
-			maskchar = 0
-			mask = b''
-		if len(data) < 126:
-			l = bytes((maskchar | len(data),))
-		elif len(data) < 1 << 16:
-			l = bytes((maskchar | 126,)) + struct.pack('!H', len(data))
-		else:
-			l = bytes((maskchar | 127,)) + struct.pack('!Q', len(data))
-		try:
-			self.socket.send(bytes((0x80 | opcode,)) + l + mask + data)
-		except:
-			# Something went wrong; close the socket(in case it wasn't yet).
-			if DEBUG > 0:
-				traceback.print_exc()
-			log('closing socket due to problem while sending.')
-			self.socket.close()
-		if opcode == 8:
-			self.socket.close()
-	# }}}
-	def _websocket_ping(self, data = b''): # Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong. {{{
-		'''Send a ping, return if a pong was received since last ping.
-		@param data: Data to send with the ping.
-		@return True if a pong was received since last ping, False if not.
-		'''
-		ret = self._pong
-		self._pong = False
-		self._websocket_send(data, opcode = 9)
-		return ret
-	# }}}
-	def _websocket_close(self):	# Close a WebSocket.  (Use self.socket.close for other connections.)  {{{
-		'''Send close request, and close the connection.
-		@return None.
-		'''
-		self._websocket_send(b'', 8)
-		self.socket.close()
-	# }}}
-	def _websocket_opened(self): # {{{
-		'''This function does nothing by default, but can be overridden
-		by the application.  It is called when a new websocket is
-		opened.  As this happens from the constructor, it is useless to
-		override it in a Websocket object; it must be overridden in the
-		class.
-		@return None.
-		'''
-		pass
-	# }}}
-	def _websocket_closed(self): # {{{
-		'''This function does nothing by default, but can be overridden
-		by the application.  It is called when the websocket is closed.
-		@return None.
-		'''
-		pass
-	# }}}
-# }}}
-
-# Set of inactive websockets, and idle handle for _activate_all.
-_activation = [set(), None]
-
-def call(reply, target, *a, **ka): # {{{
-	'''Make a call to a function or generator.
-	If target is a generator, the call will return when it finishes.
-	Yielded values are ignored.  Extra arguments are passed to target.
-	@param reply: Function to call with return value when it is ready, or
-		None.
-	@param target: Function or generator to call.
-	@param a: Arguments that are passed to target.
-	@param ka: Keyword arguments that are passed to target.
-	@return None.
-	'''
-	ret = target(*a, **ka)
-	if type(ret) is not RPC._generatortype:
-		if reply is not None:
-			reply(ret)
-		return
-	# Target is a generator.
-	def wake(arg = None):
-		try:
-			return ret.send(arg)
-		except StopIteration as result:
-			if reply is not None:
-				reply(result.value)
-	# Start the generator.
-	wake()
-	# Send it its wakeup function.
-	wake(wake)
-# }}}
-
-class RPC(Websocket): # {{{
-	'''Remote Procedure Call over Websocket.
+class RPC : public Websocket { // {{{
+	/* Remote Procedure Call over Websocket.
 	This class manages a communication object, and on the other end of the
 	connection a similar object should exist.  When calling a member of
 	this class, the request is sent to the remote object and the function
@@ -522,220 +136,56 @@ class RPC(Websocket): # {{{
 
 	If no communication object is given in the constructor, any calls that
 	the remote end attempts will fail.
-	'''
-	_generatortype = type((lambda: (yield))())
-	_index = 0
-	_calls = {}
-	@classmethod
-	def _get_index(cls): # {{{
-		while cls._index in cls._calls:
-			cls._index += 1
-		# Put a limit on the _index values.
-		if cls._index >= 1 << 31:
-			cls._index = 0
-			while cls._index in cls._calls:
-				cls._index += 1
-		return cls._index
-	# }}}
-	def __init__(self, port, recv = None, error = None, *a, **ka): # {{{
-		'''Create a new RPC object.  Extra parameters are passed to the
-		Websocket constructor, which passes its extra parameters to the
-		network.Socket constructor.
-		@param port: Host and port to connect to, same format as
-			python-network uses.
-		@param recv: Function (or class) that receives this object as
-			an argument and returns a communication object.
-		'''
-		_activation[0].add(self)
-		if _activation[1] is None:
-			_activation[1] = add_idle(_activate_all)
-		self._delayed_calls = []
-		## Groups are used to do selective broadcast() events.
-		self.groups = set()
-		Websocket.__init__(self, port, recv = RPC._recv, *a, **ka)
-		self._error = error
-		self._target = recv(self) if recv is not None else None
-	# }}}
-	def __call__(self): # {{{
-		'''Internal use only.  Do not call.  Activate the websocket; send initial frames.
-		@return None.
-		'''
-		if self._delayed_calls is None:
-			return
-		calls = self._delayed_calls
-		self._delayed_calls = None
-		for call in calls:
-			if not hasattr(self._target, call[1]) or not callable(getattr(self._target, call[1])):
-				self._send('error', 'invalid delayed call frame %s' % repr(call))
-			else:
-				self._call(call[0], call[1], call[2], call[3])
-	# }}}
-	class _wrapper: # {{{
-		def __init__(self, base, attr): # {{{
-			self.base = base
-			self.attr = attr
-		# }}}
-		def __call__(self, *a, **ka): # {{{
-			my_id = RPC._get_index()
-			self.base._send('call', (my_id, self.attr, a, ka))
-			my_call = [None]
-			RPC._calls[my_id] = lambda x: my_call.__setitem__(0, (x,))	# Make it a tuple so it cannot be None.
-			while my_call[0] is None:
-				data = self.base._websocket_read(self.base.socket.recv(), True)
-				while data is not None:
-					self.base._recv(data)
-					data = self.base._websocket_read(b'')
-			del RPC._calls[my_id]
-			return my_call[0][0]
-		# }}}
-		def __getitem__(self, *a, **ka): # {{{
-			self.base._send('call', (None, self.attr, a, ka))
-		# }}}
-		def bg(self, reply, *a, **ka): # {{{
-			my_id = RPC._get_index()
-			self.base._send('call', (my_id, self.attr, a, ka))
-			RPC._calls[my_id] = lambda x: self.do_reply(reply, my_id, x)
-		# }}}
-		def wait(self, wake, *a, **ka): # {{{
-			self.bg(wake, *a, **ka)
-			return (yield)
-		# }}}
-		def do_reply(self, reply, my_id, ret): # {{{
-			del RPC._calls[my_id]
-			reply(ret)
-		# }}}
-		# alternate names. {{{
-		def call(self, *a, **ka):
-			self.__call__(*a, **ka)
-		def event(self, *a, **ka):
-			self.__getitem__(*a, **ka)
-		# }}}
-	# }}}
-	def _send(self, type, object): # {{{
-		'''Send an RPC packet.
-		@param type: The packet type.
-			One of "return", "error", "call".
-		@param object: The data to send.
-			Return value, error message, or function arguments.
-		'''
-		if DEBUG > 1:
-			log('sending:' + repr(type) + repr(object))
-		Websocket._websocket_send(self, json.dumps((type, object)))
-	# }}}
-	def _parse_frame(self, frame): # {{{
-		'''Decode an RPC packet.
-		@param frame: The packet.
-		@return (type, object) or (None, error_message).
-		'''
-		try:
-			# Don't choke on Chrome's junk at the end of packets.
-			data = json.JSONDecoder().raw_decode(frame)[0]
-		except ValueError:
-			log('non-json frame: %s' % repr(frame))
-			return (None, 'non-json frame')
-		if type(data) is not list or len(data) != 2 or not isinstance(data[0], str):
-			log('invalid frame %s' % repr(data))
-			return (None, 'invalid frame')
-		if data[0] == 'call':
-			if not isinstance(data[1], list):
-				log('invalid call frame (no list) %s' % repr(data))
-				return (None, 'invalid frame')
-			if len(data[1]) != 4:
-				log('invalid call frame (list length is not 4) %s' % repr(data))
-				return (None, 'invalid frame')
-			if (data[1][0] is not None and not isinstance(data[1][0], int)):
-				log('invalid call frame (invalid id) %s' % repr(data))
-				return (None, 'invalid frame')
-			if not isinstance(data[1][1], str):
-				log('invalid call frame (no string target) %s' % repr(data))
-				return (None, 'invalid frame')
-			if not isinstance(data[1][2], list):
-				log('invalid call frame (no list args) %s' % repr(data))
-				return (None, 'invalid frame')
-			if not isinstance(data[1][3], dict):
-				log('invalid call frame (no dict kwargs) %s' % repr(data))
-				return (None, 'invalid frame')
-			if self._delayed_calls is None and (not hasattr(self._target, data[1][1]) or not callable(getattr(self._target, data[1][1]))):
-				log('invalid call frame (no callable) %s' % repr(data))
-				return (None, 'invalid frame')
-		elif data[0] not in ('error', 'return'):
-			log('invalid frame type %s' % repr(data))
-			return (None, 'invalid frame')
-		return data
-	# }}}
-	def _recv(self, frame): # {{{
-		'''Receive a websocket packet.
-		@param frame: The packet.
-		@return None.
-		'''
-		data = self._parse_frame(frame)
-		if DEBUG > 1:
-			log('packet received: %s' % repr(data))
-		if data[0] is None:
-			self._send('error', data[1])
-			return
-		elif data[0] == 'error':
-			if DEBUG > 0:
-				traceback.print_stack()
-			if self._error is not None:
-				self._error(data[1])
-			else:
-				raise ValueError(data[1])
-		elif data[0] == 'event':
-			# Do nothing with this; the packet is already logged if DEBUG > 1.
-			return
-		elif data[0] == 'return':
-			assert data[1][0] in RPC._calls
-			RPC._calls[data[1][0]] (data[1][1])
-			return
-		elif data[0] == 'call':
-			try:
-				if self._delayed_calls is not None:
-					self._delayed_calls.append(data[1])
-				else:
-					self._call(data[1][0], data[1][1], data[1][2], data[1][3])
-			except:
-				traceback.print_exc()
-				log('error: %s' % str(sys.exc_info()[1]))
-				self._send('error', traceback.format_exc())
-		else:
-			self._send('error', 'invalid RPC command')
-	# }}}
-	def _call(self, reply, member, a, ka): # {{{
-		'''Make local function call at remote request.
-		The local function may be a generator, in which case the call
-		will return when it finishes.  Yielded values are ignored.
-		@param reply: Return code, or None for event.
-		@param member: Requested function name.
-		@param a: Arguments.
-		@param ka: Keyword arguments.
-		@return None.
-		'''
-		call((lambda ret: self._send('return', (reply, ret))) if reply is not None else None, getattr(self._target, member), *a, **ka)
-	# }}}
-	def __getattr__(self, attr): # {{{
-		'''Select member to call on remote communication object.
-		@param attr: Member name.
-		@return Function which calls the remote object when invoked.
-		'''
-		if attr.startswith('_'):
-			raise AttributeError('invalid RPC function name %s' % attr)
-		return RPC._wrapper(self, attr)
-	# }}}
-# }}}
+	*/
+public:
+	typedef void (*Reply)(std::shared_ptr <WebObject>, void *self_ptr);
+	typedef std::shared_ptr <WebVector> Args;
+	typedef std::shared_ptr <WebMap> KwArgs;
+	typedef std::shared_ptr <WebObject> (*PublishedFn)(Args args, KwArgs kwargs, void *user_data);
+	typedef coroutine (*PublishedCo)(Args args, KwArgs kwargs, void *user_data);
+	struct Call {
+		int code;
+		std::string target;
+		Args args;
+		KwArgs kwargs;
+		void *user_data;
+	};
+	typedef void (*ErrorCb)(std::string const &message, void *user_data);
+	struct ReplyData {
+		Reply reply;
+		void *user_data;
+	};
+private:
+	ErrorCb error;
+	static int reply_index;
+	static std::map <int, ReplyData> expecting_reply;
+	static Loop::IdleHandle activation_handle;
+	static std::list <RPC *> activation_queue;
+	std::list <Call> delayed_calls;
+	bool activated;
+	std::map <std::string, PublishedFn> published_fn;
+	std::map <std::string, PublishedCo> published_co;
+	std::set <std::map <std::string, std::shared_ptr <RPC> > > groups;
+	void *user_data;
+	static int get_index();
+	static bool activate_all(void *self_ptr);
+	void activate();
+	static void recv(std::string const &frame, void *self_ptr);
+	void send(std::string const &code, std::shared_ptr <WebObject> object);
+	struct IdSelf { // {{{
+		int id;
+		RPC *self;
+	}; // }}}
+	static void call_return(std::shared_ptr <WebObject> ret, void *idselfptr);
+	void called(int id, std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
+	static void fgcb(std::shared_ptr <WebObject> ret, void *user_data);
+public:
+	RPC(std::string const &address, std::map <std::string, PublishedFn> const &published_fn = {}, std::map <std::string, PublishedCo> const &published_co = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}});
+	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, Reply cb = nullptr, void *override_user_data = nullptr);
+	coroutine fgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
+}; // }}}
 
-def _activate_all(): # {{{
-	'''Internal function to activate all inactive RPC websockets.
-	@return False, so this can be registered as an idle task.
-	'''
-	if _activation[0] is not None:
-		for s in _activation[0]:
-			s()
-	_activation[0].clear()
-	_activation[1] = None
-	return False
-# }}}
-
+/*
 class _Httpd_connection:	# {{{
 	'''Connection object for an HTTP server.
 	This object implements the internals of an HTTP server.  It
@@ -1402,34 +852,6 @@ class RPChttpd(Httpd): # {{{
 		Httpd.__init__(self, port, target, websocket = RPC, *a, **ka)
 	# }}}
 # }}}
-def fgloop(*a, **ka): # {{{
-	'''Activate all websockets and start the main loop.
-	See the documentation for python-network for details.
-	@return See python-network documentation.
-	'''
-	_activate_all()
-	return network.fgloop(*a, **ka)
-# }}}
-def bgloop(*a, **ka): # {{{
-	'''Activate all websockets and start the main loop in the background.
-	See the documentation for python-network for details.
-	@return See python-network documentation.
-	'''
-	_activate_all()
-	return network.bgloop(*a, **ka)
-# }}}
-def iteration(*a, **ka): # {{{
-	'''Activate all websockets and run one loop iteration.
-	See the documentation for python-network for details.
-	@return See python-network documentation.
-	'''
-	_activate_all()
-	return network.iteration(*a, **ka)
-# }}}
+*/
 
-if __name__ == '__main__':
-	import importlib.resources
-	files = [x for x in importlib.resource.contents(__package__) if x.endswith(os.extsep + 'js')]
-	for file in files:
-		with importlib.resources.path(websocketd, 'rpc.js') as p:
-			print(p)
+// vim: set fileencoding=utf-8 foldmethod=marker :
