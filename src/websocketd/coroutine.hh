@@ -1,3 +1,6 @@
+#ifndef _COROUTINE_HH
+#define _COROUTINE_HH
+
 // Includes. {{{
 #include "webobject.hh"
 #include <coroutine>
@@ -45,16 +48,18 @@ struct coroutine { // {{{
 	coroutine(coroutine const &other) = delete;
 	coroutine &operator=(coroutine const &other) = delete;
 	~coroutine() { STARTFUNC; handle.destroy(); }
-	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> to_coroutine = WebNone::create());	// Argument is returned from Yield.
+	static std::shared_ptr <WebObject> activate(handle_type *handle, std::shared_ptr <WebObject> to_coroutine = WebNone::create());	// Argument is returned from Yield.
+	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> to_coroutine = WebNone::create()) { return activate(&handle, to_coroutine); }
 	operator bool() { STARTFUNC; return handle.done(); }
 	void set_cb(promise_type::Cb new_cb, void *data = nullptr) { STARTFUNC; handle.promise().set_cb(new_cb, data); }
+	std::shared_ptr <WebObject> result() { return handle.promise().from_coroutine; }
 }; // }}}
 
 struct YieldAwaiter { // {{{
 	// This class lets "yield" (really co_await YieldAwaiter()) send an argument and return a value.
 	coroutine::promise_type *promise;
 	std::shared_ptr <WebObject> from_coroutine;	// cache for passed value, because promise is not accessible when it is passed.
-	YieldAwaiter(std::shared_ptr <WebObject> from_coroutine) : from_coroutine(from_coroutine) { STARTFUNC; }
+	YieldAwaiter(std::shared_ptr <WebObject> from_coroutine) : from_coroutine(from_coroutine) { STARTFUNC; if (from_coroutine) std::cerr << "yielding " << from_coroutine->print() << std::endl; }
 	std::shared_ptr <WebObject> await_resume();
 	bool await_ready() { STARTFUNC; return false; }
 	bool await_suspend(coroutine::handle_type handle);
@@ -85,5 +90,7 @@ struct GetHandleAwaiter { // {{{
 // Syntactic sugar for common case.
 #define YieldFrom(var, target) YieldFromFull(auto, var, target, WebNone::create())
 // }}}
+
+#endif
 
 // vim: set foldmethod=marker :

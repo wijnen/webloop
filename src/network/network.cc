@@ -42,6 +42,7 @@ sockets.  Connection targets can be specified in several ways.
 #include <sys/types.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include "../websocketd/webobject.hh"
 
 /* {{{ Interface description
 // - connection setup
@@ -87,7 +88,7 @@ void log_impl(std::string const &message, std::string const &filename, std::stri
 	char buffer[100];
 	auto t = std::time(nullptr);
 	strftime(buffer, sizeof(buffer), log_date ? "%F %T" : "%T", std::gmtime(&t));
-	(*log_output) << buffer << ": " << filename << ":" << funcname << ":" << line << message << std::endl;
+	(*log_output) << buffer << ": " << filename << ":" << line << ":" << funcname << ": " << message << std::endl;
 } // }}}
 // }}}
 
@@ -272,7 +273,7 @@ bool Socket::read_lines_impl(void *self_ptr) { // {{{
 Socket::Socket(std::string const &address, void *user_data) // {{{
 	:
 		fd(-1),
-		mymaxsize(0),
+		mymaxsize(4096),
 		user_data(user_data),
 		read_item({nullptr, -1, 0, nullptr, nullptr, nullptr, -1}),
 		read_cb(nullptr),
@@ -404,6 +405,7 @@ void Socket::send(std::string const &data) { // {{{
 	*/
 	if (fd < 0)
 		return;
+	log("Sending: " + WebString(data).dump());
 	size_t p = 0;
 	while (p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);

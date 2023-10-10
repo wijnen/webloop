@@ -82,14 +82,16 @@ locally by using call().
 // * 3: Incomplete packet information.
 // * 4: All incoming and outgoing data.
 // * 5: Non-websocket data.
-int DEBUG = 0; // if os.getenv('NODEBUG') else int(os.getenv('DEBUG', 1))
+int DEBUG = 5; // if os.getenv('NODEBUG') else int(os.getenv('DEBUG', 1))
 
-std::string strip(std::string const &src, std::string const &chars = " \t\v\f") { // {{{
+std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f") { // {{{
 	auto first = src.find_first_not_of(chars);
 	if (first == std::string::npos)
 		return std::string();
 	auto last = src.find_last_not_of(chars);
-	return src.substr(first, last - first + 1);
+	auto ret = src.substr(first, last - first + 1);
+	log("stripped: '" + ret + "'");
+	return ret;
 } // }}}
 
 class Websocket { // {{{
@@ -119,6 +121,7 @@ public:
 	Settings settings;
 	std::map <std::string, std::string> headers;
 	static void disconnect(void *self_ptr) { // {{{
+		STARTFUNC;
 		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
 		if (self->is_closed)
 			return;
@@ -132,12 +135,14 @@ public:
 		keepalive_handle(),
 		is_closed(true),
 		pong_seen(true),
+		current_opcode(uint8_t(-1)),
 		receiver(receiver),
 		send_mask(true),
 		user_data(user_data),
 		settings(settings),
 		headers()
 	{
+		STARTFUNC;
 		/* When constructing a Websocket, a connection is made to the
 		requested port, and the websocket handshake is performed.  This
 		constructor passes any extra arguments to the network.Socket
@@ -241,8 +246,9 @@ public:
 			}
 			std::string line = hdrdata.substr(0, pos);
 			hdrdata = hdrdata.substr(pos + 1);
-			if (line.empty())
+			if (strip(line).empty())
 				break;
+			log("Header: " + line);
 			std::string::size_type sep = line.find(":");
 			if (sep == std::string::npos) {
 				log("invalid header line");
@@ -252,6 +258,7 @@ public:
 			std::string value = line.substr(sep + 1);
 			headers[strip(key)] = strip(value);
 		}
+		is_closed = false;
 		socket.read(read, nullptr, settings.loop);
 		//disconnect_cb(this); // TODO: allow disconnect callbacks.
 		// Set up keepalive heartbeat.
@@ -269,14 +276,16 @@ public:
 		buffer(),
 		fragments(),
 		keepalive_handle(),
-		is_closed(true),
+		is_closed(false),
 		pong_seen(true),
+		current_opcode(uint8_t(-1)),
 		receiver(receiver),
 		send_mask(false),
 		user_data(user_data),
 		settings(settings),
 		headers()
 	{
+		STARTFUNC;
 		/* When constructing a Websocket, a connection is made to the
 		requested port, and the websocket handshake is performed.  This
 		constructor passes any extra arguments to the network.Socket
@@ -324,12 +333,14 @@ public:
 			log("accepted websocket");
 	} // }}}
 	static bool keepalive(void *self_ptr) { // {{{
+		STARTFUNC;
 		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
 		if (!self->ping())
 			log("Warning: no keepalive reply received");
 		return true;
 	} // }}}
 	static void read(std::string &data, void *self_ptr) { // {{{
+		STARTFUNC;
 		Websocket *self = reinterpret_cast <Websocket *>(self_ptr);
 		// Handle received data. Return bool to use as read callback.
 		// Websocket data consists of:
@@ -351,7 +362,7 @@ public:
 		//log("received: " + data);
 		if (DEBUG > 2) {
 			std::ostringstream s;
-			s << "received " << data.length() << " bytes";
+			s << "received " << data.length() << " bytes: " << WebString(data).dump();
 			log(s.str());
 		}
 		if (DEBUG > 3) {
@@ -411,6 +422,7 @@ public:
 			else {
 				len = b;
 				pos = 2;
+				std::cerr << "packet length is " << len << std::endl;
 			}
 			if (self->buffer.length() < pos + (have_mask ? 4 : 0) + len) {
 				// Not enough data for packet.
@@ -424,12 +436,16 @@ public:
 			std::string header = self->buffer.substr(0, pos);
 			uint8_t opcode = header[0] & 0xf;
 			std::string packet;
-			if (have_mask) {
-				uint32_t mask = *(reinterpret_cast <uint32_t *> (&self->buffer.data()[pos]));
+			uint32_t mask;
+			if (have_mask)
+				mask = *(reinterpret_cast <uint32_t *> (&self->buffer.data()[pos]));
+			if (have_mask && mask != 0) {
 				pos += 4;
 				auto p = pos;
-				for (p = pos; p + 3 < self->buffer.size(); p += 4)
-					packet += std::string(*(reinterpret_cast <uint32_t const *> (&self->buffer.data()[p])) ^ mask, 4);
+				for (p = pos; p + 3 < self->buffer.size(); p += 4) {
+					auto word = *(reinterpret_cast <uint32_t const *> (&self->buffer.data()[p])) ^ mask;
+					packet += std::string(reinterpret_cast <char const *> (&word), 4);
+				}
 				uint8_t m[4];
 				*reinterpret_cast <uint32_t *>(m) = mask;
 				for (int i = 0; p < self->buffer.size(); ++p, ++i)
@@ -477,7 +493,7 @@ public:
 				return;
 			case 9:
 				// Ping.
-				self->send(data, 10);	// Pong
+				self->send(packet, 10);	// Pong
 				break;
 			case 10:
 				// Pong.
@@ -485,7 +501,7 @@ public:
 				break;
 			case 1:	// Text.
 			case 2:	// Binary.
-				self->receiver(data, self->user_data);
+				self->receiver(packet, self->user_data);
 				break;
 			default:
 				log("invalid opcode");
@@ -495,7 +511,8 @@ public:
 			}
 		}
 	} // }}}
-	void send(std::string const &data, int opcode = 2) {	// Send a WebSocket frame.  {{{
+	void send(std::string const &data, int opcode = 1) {	// Send a WebSocket frame.  {{{
+		STARTFUNC;
 		/* Send a Websocket frame to the remote end of the connection.
 		@param data: Data to send.
 		@param opcode: Opcade to send.  0 = fragment, 1 = text packet, 2 = binary packet, 8 = close request, 9 = ping, 10 = pong.
@@ -511,7 +528,7 @@ public:
 		std::string maskcode;
 		if (send_mask) {
 			maskchar = 0x80;
-			// Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this module).
+			// Masks are stupid, but the standard requires them.  Don't waste time on encoding (or decoding, if also using this library).
 			maskcode = std::string("\0\0\0\0", 4);
 		}
 		else {
@@ -519,8 +536,10 @@ public:
 		}
 		std::string len;
 		size_t l = data.length();
-		if (l < 0x7e)
-			len = std::string(maskchar | l, 1);
+		if (l < 0x7e) {
+			char lenchar = maskchar | l;
+			len = std::string(&lenchar, 1);
+		}
 		else if (l < 1 << 16) {
 			char lendata[3] {char(maskchar | 0x7e), char((l >> 8) & 0xff), char(l & 0xff)};
 			len = std::string(lendata, 3);
@@ -548,6 +567,7 @@ public:
 		}
 	} // }}}
 	bool ping(std::string const &data = std::string()) { // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong. {{{
+		STARTFUNC;
 		/* Send a ping, return if a pong was received since last ping.
 		@param data: Data to send with the ping.
 		@return True if a pong was received since last ping, False if not.
@@ -558,6 +578,7 @@ public:
 		return ret;
 	} // }}}
 	void close() {	// Close a WebSocket.  (Use self.socket.close for other connections.)  {{{
+		STARTFUNC;
 		/* Send close request, and close the connection.
 		@return None.
 		*/
@@ -587,6 +608,7 @@ public:
 	typedef std::shared_ptr <WebVector> Args;
 	typedef std::shared_ptr <WebMap> KwArgs;
 	typedef std::shared_ptr <WebObject> (*PublishedFn)(Args args, KwArgs kwargs, void *user_data);
+	typedef coroutine (*PublishedCo)(Args args, KwArgs kwargs, void *user_data);
 	struct Call {
 		int code;
 		std::string target;
@@ -595,25 +617,31 @@ public:
 		void *user_data;
 	};
 	typedef void (*ErrorCb)(std::string const &message, void *user_data);
+	struct ReplyData {
+		Reply reply;
+		void *user_data;
+	};
 private:
-	void *user_data;
 	ErrorCb error;
 	static int reply_index;
-	static std::map <int, Reply> expecting_reply;
+	static std::map <int, ReplyData> expecting_reply;
 	static Loop::IdleHandle activation_handle;
 	static std::list <RPC *> activation_queue;
 	std::list <Call> delayed_calls;
 	bool activated;
 	std::map <std::string, PublishedFn> published_fn;
-	std::map <std::string, coroutine> published_co;
+	std::map <std::string, PublishedCo> published_co;
 	std::set <std::map <std::string, std::shared_ptr <RPC> > > groups;
+	void *user_data;
 	static int get_index() { // {{{
+		STARTFUNC;
 		++reply_index;
 		while (expecting_reply.contains(reply_index) || reply_index == 0)
 			++reply_index;
 		return reply_index;
 	} // }}}
 	static bool activate_all(void *self_ptr) { // {{{
+		STARTFUNC;
 		RPC *self = reinterpret_cast <RPC *>(self_ptr);
 		/* Internal function to activate all inactive RPC websockets.
 		@return False, so this can be registered as an idle task.
@@ -627,6 +655,7 @@ private:
 		return false;
 	} // }}}
 	void activate() { // {{{
+		STARTFUNC;
 		/* Internal use only.  Activate the websocket; send initial frames.
 		@return None.
 		*/
@@ -643,11 +672,13 @@ private:
 		activated = true;
 	} // }}}
 	static void recv(std::string const &frame, void *self_ptr) { // {{{
+		STARTFUNC;
 		/* Receive a websocket packet.
 		@param frame: The packet.
 		@return None.
 		*/
 		RPC *self = reinterpret_cast <RPC *>(self_ptr);
+		log("frame: " + frame);
 		auto data = WebObject::load(frame);
 		if (DEBUG > 1)
 			log("packet received: " + data->print());
@@ -702,12 +733,22 @@ private:
 		} // }}}
 
 		if (ptype == "return") { // string:"return", int:id, WebObject:value {{{
-			if (length != 3) {
-				log("not exactly 2 argument received with return");
+			if (length != 2) {
+				log("not exactly 1 argument received with return");
 				return;
 			}
-			auto idobj = (*vdata)[1];
-			auto payload = (*vdata)[2];
+			auto argobj = (*vdata)[1];
+			if (argobj->get_type() != WebObject::VECTOR) {
+				log("return argument is not vector");
+				return;
+			}
+			auto arg = argobj->as_vector();
+			if (arg->size() != 2) {
+				log("return argument is not length 2");
+				return;
+			}
+			auto idobj = (*arg)[0];
+			auto payload = (*arg)[1];
 			if (idobj->get_type() != WebObject::INT) {
 				log("return id is not int");
 				return;
@@ -720,7 +761,9 @@ private:
 				return;
 			}
 
-			p->second(payload, self->user_data);
+			auto target = p->second;
+			expecting_reply.erase(p);
+			target.reply(payload, target.user_data);
 			return;
 		} // }}}
 
@@ -759,7 +802,7 @@ private:
 				}
 				catch (...) {
 					log("error: remote call failed");
-					self->send("error", id, WebString::create("remote call failed"));
+					self->send("error", WebVector::create(WebInt::create(id), WebString::create("remote call failed")));
 				}
 			}
 			else
@@ -769,7 +812,8 @@ private:
 
 		log("error: invalid RPC command");
 	} // }}}
-	void send(std::string const &code, int id, std::shared_ptr <WebObject> object) { // {{{
+	void send(std::string const &code, std::shared_ptr <WebObject> object) { // {{{
+		STARTFUNC;
 		/* Send an RPC packet.
 		@param type: The packet type.
 			One of "return", "error", "call".
@@ -777,8 +821,8 @@ private:
 			Return value, error message, or function arguments.
 		*/
 		if (DEBUG > 1)
-			log((std::ostringstream() << "sending: " << id << " " << object->print()).str());
-		auto obj = WebVector::create(WebVector{code, id, object});
+			log((std::ostringstream() << "sending: " << " " << object->print()).str());
+		auto obj = WebVector::create(WebString::create(code), object);
 		Websocket::send(obj->dump());
 	} // }}}
 	struct IdSelf { // {{{
@@ -786,13 +830,15 @@ private:
 		RPC *self;
 	}; // }}}
 	static void call_return(std::shared_ptr <WebObject> ret, void *idselfptr) { // {{{
+		STARTFUNC;
 		auto idself = reinterpret_cast <IdSelf *>(idselfptr);
-		auto self = idself.self;
-		int id = idself.id;
-		self->send("return", id, ret);
+		auto self = idself->self;
+		int id = idself->id;
+		self->send("return", WebVector::create(WebInt::create(id), ret));
 		delete idself;
 	} // }}}
 	void called(int id, std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs) { // {{{
+		STARTFUNC;
 		/* Make local function call at remote request.
 		The local function may be a generator, in which case the call
 		will return when it finishes.  Yielded values are ignored.
@@ -805,16 +851,16 @@ private:
 		// Try to call target function.
 		auto fn = published_fn.find(target);
 		if (fn != published_fn.end()) {
-			auto ret = fn->second(args, kwargs);
+			auto ret = fn->second(args, kwargs, user_data);
 			if (id != 0)
-				send("return", id, ret);
+				send("return", WebVector::create(WebInt::create(id), ret));
 			return;
 		}
 
 		// Try to call target coroutine.
 		auto co = published_co.find(target);
 		if (co != published_co.end()) {
-			auto c = co->second(args, kwargs);
+			auto c = co->second(args, kwargs, user_data);
 			if (id != 0)
 				c.set_cb(call_return, new IdSelf(id, this));
 			c();	// Start coroutine.
@@ -825,14 +871,16 @@ private:
 		throw "trying to call unregistered target";
 	} // }}}
 	static void fgcb(std::shared_ptr <WebObject> ret, void *user_data) { // {{{
-		auto handle = reinterpret_cast <coroutine::handle *> (user_data);
-		(*handle)(ret);
+		STARTFUNC;
+		auto handle = reinterpret_cast <coroutine::handle_type *> (user_data);
+		coroutine::activate(handle, ret);
 		delete handle;
 	} // }}}
 public:
-	RPC(std::string const *address, std::map <std::string, PublishedFn> const &published_fn = {}, std::map <std::string, coroutine> const &published_co = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}}) // {{{
-			: Websocket(address, recv, settings, this), error(error), delayed_calls{}, activated(false), published_fn{}, published_co{}, groups{}, user_data(user_data)
+	RPC(std::string const &address, std::map <std::string, PublishedFn> const &published_fn = {}, std::map <std::string, PublishedCo> const &published_co = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}}) // {{{
+			: Websocket(address, recv, settings, this), error(error), delayed_calls{}, activated(false), published_fn(published_fn), published_co(published_co), groups{}, user_data(user_data)
 	{
+		STARTFUNC;
 		/* Create a new RPC object.  Extra parameters are passed to the
 		Websocket constructor, which passes its extra parameters to the
 		network.Socket constructor.
@@ -843,26 +891,39 @@ public:
 		*/
 		// Note: not thread-safe.
 		if (activation_queue.empty())
-			activation_handle = Loop.get(loop)->add_idle({&activate_all, this});
+			activation_handle = Loop::get(settings.loop)->add_idle({&activate_all, this});
 		activation_queue.push_back(this);
 	} // }}}
-	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, Reply cb = nullptr, void *user_data = nullptr) { // {{{
+	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, Reply cb = nullptr, void *override_user_data = nullptr) { // {{{
+		STARTFUNC;
 		//typedef void (*Reply)(std::shared_ptr <WebObject>, void *self_ptr);
+		if (!args)
+			args = WebVector::create();
+		if (!kwargs)
+			kwargs = WebMap::create();
 		int index;
 		if (cb) {
 			index = get_index();
-			expecting_reply[index] = cb;
+			expecting_reply[index] = {cb, override_user_data ? override_user_data : user_data};
 		}
 		else
 			index = 0;
-		send("call", index, WebVector::create(args, kwargs));
+		send("call", WebVector::create(WebInt::create(index), WebString::create(target), args, kwargs));
 	} // }}}
 	coroutine fgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs) { // {{{
+		STARTFUNC;
 		auto handle = GetHandle();
 		bgcall(target, args, kwargs, fgcb, new coroutine::handle_type(handle));
-		co_return Yield(WebNone::create());
+		auto ret = Yield(WebNone::create());
+		log("fgcall returns " + (ret ? ret->print() : "nothing"));
+		co_return ret;
 	} // }}}
 }; // }}}
+
+int RPC::reply_index;
+std::map <int, RPC::ReplyData> RPC::expecting_reply;
+Loop::IdleHandle RPC::activation_handle;
+std::list <RPC *> RPC::activation_queue;
 
 /*
 class _Httpd_connection:	# {{{

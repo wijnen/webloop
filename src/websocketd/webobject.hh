@@ -12,12 +12,13 @@
 #include <ieee754.h>
 #include <sstream>
 #include <memory>
+#include <iomanip>
 // }}}
 
-#define WEBSOCKET_DUMPS_JSON
+#define WEBOBJECT_DUMPS_JSON
 
-//#define STARTFUNC do { std::cout << "Function start: " << __LINE__ << ": " << __FUNCTION__ << std::endl; } while(0)
-#define STARTFUNC do {} while(0)
+#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
+//#define STARTFUNC do {} while(0)
 
 class WebNone;
 class WebInt;
@@ -32,6 +33,7 @@ public:		// Types
 	typedef std::vector <std::shared_ptr <WebObject> > VectorType;
 	typedef std::map <std::string, std::shared_ptr <WebObject> > MapType;
 	typedef int64_t IntType;
+	typedef double FloatType;
 private:	// Data members
 	Type const type;
 public:		// Member functions
@@ -59,12 +61,16 @@ public:		// Member functions
 	static std::shared_ptr <WebObject> load(std::string const &data);
 	friend std::ostream &operator<<(std::ostream &s, WebObject const &o) { s << o.print(); return s; }
 private:
+#ifndef WEBOBJECT_DUMPS_JSON
 	virtual void load_impl(std::string const &data) = 0;
+#endif
 }; // }}}
 
 // Object class definitions.
 class WebNone : public WebObject { // {{{
+#ifndef WEBOBJECT_DUMPS_JSON
 	void load_impl(std::string const &data) override { assert(data.length() == 1); }
+#endif
 	static std::shared_ptr <WebNone> instance; // While it is allowed to construct more of them, create() will always return this one.
 public:
 	WebNone() : WebObject(NONE) {}
@@ -83,11 +89,13 @@ class WebInt : public WebObject { // {{{
 	friend class WebVector;
 	friend class WebMap;
 	IntType value;
+#ifndef WEBOBJECT_DUMPS_JSON
 	void load_impl(std::string const &data) override {
 		assert(data.length() == 1 + sizeof(uint64_t));
 		uint64_t v = *reinterpret_cast <uint64_t const *>(&data.data()[1]);
 		value = le64toh(v);
 	}
+#endif
 public:
 	WebInt() : WebObject(INT), value() {}
 	WebInt(IntType value) : WebObject(INT), value(value) {}
@@ -97,17 +105,21 @@ public:
 	operator IntType &() { return value; }
 	std::string print() const override { return (std::ostringstream() << value).str(); }
 #ifdef WEBOBJECT_DUMPS_JSON
-	std::string dump() const override { std::ostringstream s(); s << value; return s.str(); }
+	std::string dump() const override { return (std::ostringstream() << value).str(); }
 #else
 	std::string dump() const override { uint64_t v = htole64(value); return "I" + std::string(reinterpret_cast <char const *>(&v), sizeof(uint64_t)); }
 #endif
 }; // }}}
 
 class WebFloat : public WebObject { // {{{
-	double value;
+	FloatType value;
+#ifndef WEBOBJECT_DUMPS_JSON
+	void load_impl(std::string const &data) override;
+#endif
+public:
 #ifdef WEBOBJECT_DUMPS_JSON
 	// TODO: Handle inf and nan.
-	std::string dump() const override { std::ostringstream s(); s << value; return s.str(); }
+	std::string dump() const override { return (std::ostringstream() << value).str(); }
 #else
 	std::string dump() const override {
 		ieee754_double v = {.d = value};
@@ -117,39 +129,22 @@ class WebFloat : public WebObject { // {{{
 	}
 #endif
 	std::string print() const override { return (std::ostringstream() << value).str(); }
-	void load_impl(std::string const &data) override;
-public:
 	WebFloat() : WebObject(FLOAT), value() {}
-	WebFloat(double value) : WebObject(FLOAT), value(value) {}
-	static std::shared_ptr <WebFloat> create(double value) { return std::shared_ptr <WebFloat> (new WebFloat(value)); }
+	WebFloat(FloatType value) : WebObject(FLOAT), value(value) {}
+	static std::shared_ptr <WebFloat> create(FloatType value) { return std::shared_ptr <WebFloat> (new WebFloat(value)); }
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebFloat(*this)); }
-	operator double() const { return value; }
-	operator double &() { return value; }
+	operator FloatType() const { return value; }
+	operator FloatType &() { return value; }
 }; // }}}
 
 class WebString : public WebObject { // {{{
 	std::string value;
-#ifdef WEBOBJECT_DUMPS_JSON
-	std::string dump() const override {
-		std::string ret = "\"";
-		for (auto c: value) {
-			if (c != '\\' && c >= 0x20 && c <= 0x7e)
-				ret += c;
-			else {
-				std::ostringstream s;
-				s << std::hex << std::fill('0') << c;
-				ret += "\\x" + s.str();
-			}
-		}
-		ret += "\"";
-		return ret;
-	}
-#else
-	std::string dump() const override { return "S" + value; }
-#endif
-	std::string print() const override { return "\"" + value + "\""; }
+#ifndef WEBOBJECT_DUMPS_JSON
 	void load_impl(std::string const &data) override { value = data.substr(1); }
+#endif
 public:
+	std::string dump() const override;
+	std::string print() const override { return "\"" + value + "\""; }
 	WebString() : WebObject(STRING), value() {}
 	WebString(std::string const &value) : WebObject(STRING), value(value) {}
 	static std::shared_ptr <WebString> create(std::string const &value) { return std::shared_ptr <WebString> (new WebString(value)); }
@@ -161,10 +156,12 @@ public:
 
 class WebVector : public WebObject { // {{{
 	VectorType value;
+#ifndef WEBOBJECT_DUMPS_JSON
+	void load_impl(std::string const &data) override;
+#endif
+public:
 	std::string dump() const override;
 	std::string print() const override;
-	void load_impl(std::string const &data) override;
-public:
 	WebVector() : WebObject(VECTOR), value() {}
 	WebVector(WebVector const &other) : WebObject(VECTOR), value() { for (auto i: other.value) value.push_back(i->copy()); }
 	WebVector(WebVector &&other) : WebObject(VECTOR), value(other.value) { other.value.clear(); }
@@ -178,14 +175,18 @@ public:
 	~WebVector() override { STARTFUNC; value.clear(); }
 	bool empty() const { return value.empty(); }
 	size_t size() const { return value.size(); }
+	void push_back(std::shared_ptr <WebObject> item) { value.push_back(item); }
+	void pop_back() { value.pop_back(); }
 }; // }}}
 
 class WebMap : public WebObject { // {{{
 	MapType value;
+#ifndef WEBOBJECT_DUMPS_JSON
+	void load_impl(std::string const &data) override;
+#endif
+public:
 	std::string dump() const override;
 	std::string print() const override;
-	void load_impl(std::string const &data) override;
-public:
 	WebMap() : WebObject(MAP), value() {}
 	WebMap(WebMap const &other) : WebObject(MAP), value() { for (auto i: other.value) value[i.first] = i.second->copy(); }
 	WebMap(WebMap &&other) : WebObject(MAP), value(other.value) { other.value.clear(); }

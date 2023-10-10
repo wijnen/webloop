@@ -1,7 +1,15 @@
 #include "websocketd.hh"
 
 int main() {
-	p = RPC("7000");
-	std::cout << p.fgcall("get_version", {}, {}) << std::endl;
+	auto p = RPC("8000");
+	auto coro = p.fgcall("get_version", {}, {});
+	coro();
+	while (!bool(coro))
+		Loop::get()->iteration(true);
+	auto version = coro();
+	if (version)
+		std::cout << version->print() << std::endl;
+	else
+		std::cout << "no version" << std::endl;
 	return 0;
 }

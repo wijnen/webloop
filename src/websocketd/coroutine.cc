@@ -1,21 +1,31 @@
 #include "coroutine.hh"
 
-std::shared_ptr <WebNone> coroutine::RETURNED = WebNone::create();
-
-std::shared_ptr <WebObject> coroutine::operator()(std::shared_ptr <WebObject> to_coroutine) { // {{{
+std::shared_ptr <WebObject> coroutine::activate(coroutine::handle_type *handle, std::shared_ptr <WebObject> to_coroutine) { // {{{
 	STARTFUNC;
-	handle.promise().to_coroutine = to_coroutine;
-	handle();
+	if (handle->done())
+		return handle->promise().from_coroutine;
+	if (to_coroutine)
+		std::cerr << "to coroutine: " << to_coroutine->print() << std::endl;
+	else
+		std::cerr << "no to coroutine" << std::endl;
+	handle->promise().to_coroutine = to_coroutine;
+	(*handle)();
+	if (handle->done())
+		return handle->promise().from_coroutine;
 	std::shared_ptr <WebObject> ret;
-	handle.promise().from_coroutine.swap(ret);
-	return std::move(ret);
+	handle->promise().from_coroutine.swap(ret);
+	return ret;
 } // }}}
 
 std::shared_ptr <WebObject> YieldAwaiter::await_resume() { // {{{
 	STARTFUNC;
 	std::shared_ptr <WebObject> ret;
 	promise->to_coroutine.swap(ret);
-	return std::move(ret);
+	if (ret)
+		std::cerr << "resuming with result: " << ret->print() << std::endl;
+	else
+		std::cerr << "resuming with no result." << std::endl;
+	return ret;
 } // }}}
 
 bool YieldAwaiter::await_suspend(coroutine::handle_type handle) { // {{{
