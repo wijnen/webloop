@@ -1,17 +1,36 @@
 /* {{{ Copyright 2013-2023 Bas Wijnen <wijnen@debian.org>
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or(at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-# }}} */
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or(at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * }}} */
+
+/*
+Some thoughts about this code; probably obsolete when you read them.
+
+An http server can be started for several reasons. example use cases:
+A - control of heater: server own opentherm connection; clients are single shot "get state" or "set target temperature".
+B - game: clients have a session. Reconnect should be possible, perhaps with timeout.
+
+a Server is started in both cases. For A, requests are handled directly. If websockets are used, they carry no state, but are only used for broadcasts.
+For B, each user has its own session object. The session contains a Socket, which may be closed (in which case the user can reconnect).
+
+Currently, a Socket is owned by the Server. This is wrong?
+
+What happens when the Socket disconnects?
+- Socket is unregistered from loop.
+- Server removes it from its list, if that exists.
+- Owner should handle this event. Until it does, the Socket should be valid in a disconnected state. (This also allows a move constructor, which is good.)
+
+*/
 
 /* Documentation. {{{
 '''@mainpage
@@ -70,21 +89,16 @@ locally by using call().
 #include <string>
 #include <map>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <cctype>
 #include "network.hh"
 #include "webobject.hh"
 #include "coroutine.hh"
+#include "url.hh"
+#include "tools.hh"
+#include "loop.hh"
 // }}}
-
-// Debug level, set from DEBUG environment variable. (TODO)
-// * 0: No debugging (default).
-// * 1: Tracebacks on errors.
-// * 2: Incoming and outgoing RPC packets.
-// * 3: Incomplete packet information.
-// * 4: All incoming and outgoing data.
-// * 5: Non-websocket data.
-extern int DEBUG;
-
-std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
 
 class Websocket { // {{{
 public:
@@ -141,8 +155,7 @@ public:
 	typedef void (*Reply)(std::shared_ptr <WebObject>, void *self_ptr);
 	typedef std::shared_ptr <WebVector> Args;
 	typedef std::shared_ptr <WebMap> KwArgs;
-	typedef std::shared_ptr <WebObject> (*PublishedFn)(Args args, KwArgs kwargs, void *user_data);
-	typedef coroutine (*PublishedCo)(Args args, KwArgs kwargs, void *user_data);
+	typedef coroutine (*Published)(Args args, KwArgs kwargs, void *user_data);
 	struct Call {
 		int code;
 		std::string target;
@@ -163,8 +176,7 @@ private:
 	static std::list <RPC *> activation_queue;
 	std::list <Call> delayed_calls;
 	bool activated;
-	std::map <std::string, PublishedFn> published_fn;
-	std::map <std::string, PublishedCo> published_co;
+	std::map <std::string, Published> published;
 	std::set <std::map <std::string, std::shared_ptr <RPC> > > groups;
 	void *user_data;
 	static int get_index();
@@ -180,108 +192,312 @@ private:
 	void called(int id, std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
 	static void fgcb(std::shared_ptr <WebObject> ret, void *user_data);
 public:
-	RPC(std::string const &address, std::map <std::string, PublishedFn> const &published_fn = {}, std::map <std::string, PublishedCo> const &published_co = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}});
+	RPC(std::string const &address, std::map <std::string, Published> const &published = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}});
 	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, Reply cb = nullptr, void *override_user_data = nullptr);
 	coroutine fgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
 }; // }}}
 
-/*
-class _Httpd_connection:	# {{{
-	'''Connection object for an HTTP server.
+template <class websocket>
+class Httpd { // {{{
+	/* HTTP server.
+	This object implements an HTTP server.  It supports GET and
+	POST, and of course websockets.
+	*/
+public:
+	class Connection;
+private:
+	friend class Connection;
+	std::vector <std::string> httpdirs;		// Directories where static web pages are searched.
+	std::vector <std::string> proxy;		// Proxy prefixes which are ignored when received.
+	typedef RPC::ErrorCb ErrorCb;
+	ErrorCb error;					// Error callback.
+	void *user_data;				// User data to send with callbacks.
+	std::map <std::string, std::string> exts;	// Handled extensions; value is mime type.
+	Loop *loop;					// Main loop for registering read events.
+	Server server;					// Network server which provides the interface.
+	std::list <Connection> connections;		// Active non-websocket connections.
+	std::list <websocket> websockets;		// Active websocket connections.
+	static void new_connection(Socket &&remote, void *self_ptr);
+	static bool server_error(void *self_ptr) { // {{{
+		Httpd *self = reinterpret_cast <Httpd *>(self_ptr);
+		(void)&self;
+		// TODO
+		return false;
+	} // }}}
+	virtual char const *authentication(Connection &connection) { (void)&connection; return nullptr; }	// Override to require authentication.
+	virtual bool valid_credentials(Connection &connection) { (void)&connection; return true; }	// Override to check credentials.
+	virtual bool page(Connection &connection) { (void)&connection; return false; }	// Override and return true to provide dynamic pages.
+public:
+	Httpd(std::string const &service, std::vector <std::string> const &httpdirs = {}, std::vector <std::string> const &proxy = {}, ErrorCb error = nullptr, void *user_data = nullptr, Loop *loop = nullptr, int backlog = 5) : // {{{
+			httpdirs(httpdirs),
+			proxy(proxy),
+			error(error),
+			user_data(user_data),
+			exts(),
+			loop(Loop::get(loop)),
+			server(service, new_connection, server_error, this, loop, backlog)
+	{
+		/* Create a webserver.
+		Additional arguments are passed to the network.Server.
+		@param port: Port to listen on.  Same format as in
+			python-network.
+		@param httpdirs: Locations of static web pages to
+			serve.
+		@param proxy: Tuple of virtual proxy prefixes that
+			should be ignored if requested.
+		*/
+
+		// Automatically add all extensions for which a mime type exists.
+		std::ifstream mimetypes("/etc/mime.types");
+		if (mimetypes.is_open()) {
+			std::set <std::string> duplicate;
+			while (true) {
+				std::string line;
+				std::getline(mimetypes, line, '\n');
+				if (!mimetypes)
+					break;
+				auto parts = split(line);
+				if (parts.size() == 0 || parts[0][0] == '#')
+					continue;
+				for (size_t i = 1; i < parts.size(); ++i) {
+					// If this is an existing duplicate, ignore it.
+					if (duplicate.contains(parts[i]))
+						continue;
+
+					// If this is a new duplicate, remove it and ignore it.
+					auto p = exts.find(parts[i]);
+					if (p != exts.end()) {
+						duplicate.insert(parts[i]);
+						exts.erase(p);
+						continue;
+					}
+
+					// Otherwise, insert it in the map.
+					if (parts[0].substr(0, 5) == "text/" || parts[0] == "application/javascript")
+						exts[parts[i]] = parts[0] + ";charset=utf-8";
+					else
+						exts[parts[i]] = parts[0];
+				}
+			}
+		}
+		else {
+			// This is probably a Windows system; use some defaults.
+			exts = {
+				{"html", "text/html;charset=utf-8"},
+				{"css", "text/css;charset=utf-8"},
+				{"js", "text/javascript;charset=utf-8"},
+				{"jpg", "image/jpeg"},
+				{"jpeg", "image/jpeg"},
+				{"png", "image/png"},
+				{"bmp", "image/bmp"},
+				{"gif", "image/gif"},
+				{"pdf", "application/pdf"},
+				{"svg", "image/svg+xml"},
+				{"txt", "text/plain;charset=utf-8"}
+			};
+		}
+	} // }}}
+	/*def page(self, connection, path = None):	// A non-WebSocket page was requested.  Use connection.address, connection.method, connection.query, connection.headers and connection.body (which should be empty) to find out more.  {{{
+		/ * Serve a non-websocket page.
+		Overload this function for custom behavior.  Call this
+		function from the overloaded function if you want the
+		default functionality in some cases.
+		@param connection: The connection that requests the
+			page.  Attributes of interest are
+			connection.address, connection.method,
+			connection.query, connection.headers and
+			connection.body (which should be empty).
+		@param path: The requested file.
+		@return True to keep the connection open after this
+			request, False to close it.
+		* /
+		if self.httpdirs is None:
+			self.reply(connection, 501)
+			return
+		if path is None:
+			path = connection.address.path
+		if path == '/':
+			address = "index"
+		else:
+			address = '/' + unquote(path) + '/'
+			while '/../' in address:
+				// Don't handle this; just ignore it.
+				pos = address.index('/../')
+				address = address[:pos] + address[pos + 3:]
+			address = address[1:-1]
+		if '.' in address.rsplit('/', 1)[-1]:
+			base, ext = address.rsplit('.', 1)
+			base = base.strip('/')
+			if ext not in self.exts and None not in self.exts:
+				log('not serving unknown extension %s' % ext)
+				self.reply(connection, 404)
+				return
+			for d in self.httpdirs:
+				filename = os.path.join(d, base + os.extsep + ext)
+				if os.path.exists(filename):
+					break
+			else:
+				log('file %s not found in %s' % (base + os.extsep + ext, ', '.join(self.httpdirs)))
+				self.reply(connection, 404)
+				return
+		else:
+			base = address.strip('/')
+			for ext in self.exts:
+				for d in self.httpdirs:
+					filename = os.path.join(d, base if ext is None else base + os.extsep + ext)
+					if os.path.exists(filename):
+						break
+				else:
+					continue
+				break
+			else:
+				log('no file %s (with supported extension) found in %s' % (base, ', '.join(self.httpdirs)))
+				self.reply(connection, 404)
+				return
+		return self.exts[ext](connection, open(filename, 'rb').read())
+	// }}} */
+}; // }}}
+
+template <class websocket>
+class Httpd <websocket>::Connection { // {{{
+	/* Connection object for an HTTP server.
 	This object implements the internals of an HTTP server.  It
 	supports GET and POST, and of course websockets.  Don't
 	construct these objects directly.
-	'''
-	def __init__(self, server, socket, websocket = Websocket, proxy = (), error = None): # {{{
-		'''Constructor for internal use.  This should not be
-			called directly.
-		@param server: Server object for which this connection
-			is handled.
-		@param socket: Newly accepted socket.
-		@param httpdirs: Locations of static web pages to
-			serve.
-		@param websocket: Websocket class from which to create
-			objects when a websocket is requested.
-		@param proxy: Tuple of virtual proxy prefixes that
-			should be ignored if requested.
-		'''
-		self.server = server
-		self.socket = socket
-		self.websocket = websocket
-		self.proxy = (proxy,) if isinstance(proxy, str) else proxy
-		self.error = error
-		self.headers = {}
-		self.address = None
-		self.socket.disconnect_cb(lambda socket, data: b'')	# Ignore disconnect until it is a WebSocket.
-		self.socket.readlines(self._line)
-		#log('Debug: new connection from %s\n' % repr(self.socket.remote))
-	# }}}
-	def _line(self, l):	# {{{
-		if DEBUG > 4:
-			log('Debug: Received line: %s' % l)
-		if self.address is not None:
-			if not l.strip():
-				self._handle_headers()
-				return
-			try:
-				key, value = l.split(':', 1)
-			except ValueError:
-				log('Invalid header line: %s' % l)
-				return
-			self.headers[key.lower()] = value.strip()
-			return
-		else:
-			try:
-				self.method, url, self.standard = l.split()
-				for prefix in self.proxy:
-					if url.startswith('/' + prefix + '/') or url == '/' + prefix:
-						self.prefix = '/' + prefix
-						break
-				else:
-					self.prefix = ''
-				address = urlparse(url)
-				path = address.path[len(self.prefix):] or '/'
-				self.url = path + url[len(address.path):]
-				self.address = urlparse(self.url)
-				self.query = parse_qs(self.address.query)
-			except:
-				traceback.print_exc()
-				self.server.reply(self, 400, close = True)
-			return
-	# }}}
-	def _handle_headers(self):	# {{{
-		if DEBUG > 4:
-			log('Debug: handling headers')
-		is_websocket = 'connection' in self.headers and 'upgrade' in self.headers and 'upgrade' in self.headers['connection'].lower() and 'websocket' in self.headers['upgrade'].lower()
-		self.data = {}
-		self.data['url'] = self.url
-		self.data['address'] = self.address
-		self.data['query'] = self.query
-		self.data['headers'] = self.headers
-		msg = self.server.auth_message(self, is_websocket) if callable(self.server.auth_message) else self.server.auth_message
-		if msg:
-			if 'authorization' not in self.headers:
-				self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
-				return
-			else:
-				auth = self.headers['authorization'].split(None, 1)
-				if auth[0].lower() != 'basic':
-					self.server.reply(self, 400, close = True)
-					return
-				pwdata = base64.b64decode(auth[1].encode('utf-8')).decode('utf-8', 'replace').split(':', 1)
-				if len(pwdata) != 2:
-					self.server.reply(self, 400, close = True)
-					return
-				self.data['user'] = pwdata[0]
-				self.data['password'] = pwdata[1]
-				if not self.server.authenticate(self):
-					self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
-					return
-		if not is_websocket:
-			if DEBUG > 4:
-				log('Debug: not a websocket')
-			self.body = self.socket.unread()
-			if self.method.upper() == 'POST':
+	*/
+	static std::map <int, char const *> http_response;
+	Httpd <websocket> *httpd;
+	Socket socket;
+public:
+	std::map <std::string, std::string> headers;
+	std::string method;
+	URL url;
+	std::string http_version;
+	std::string user;
+	std::string password;
+	std::string prefix;
+	static std::string ignore_disconnect(std::string const &pending, void *user_data) { (void)&pending; (void)&user_data; return {}; }
+	static void read_header(std::string &buffer, void *self_ptr) { // {{{
+		Connection *self = reinterpret_cast <Connection *>(self_ptr);
+		std::string::size_type p = 0;
+		std::list <std::string> lines;
+		// Read header lines. {{{
+		while (true) {
+			auto q = buffer.find('\n');
+			if (q == std::string::npos) {
+				// Header is not complete yet.
+				return;
+			}
+			std::string line = buffer.substr(p, q - p);
+			p = q + 1;
+			if (line.empty() && lines.empty()) {
+				// HTTP says we SHOULD allow at least one empty line before the request, so do that and ignore the empty line.
+				continue;
+			}
+			if (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
+				if (lines.empty())
+					log("Error: http request starts with continuation");
+				else if (lines.size() == 1) {
+					// A continuation on the request line MUST be rejected (or ignored) according to HTTP.
+					log("Error: http request contains a continuation");
+					self->socket.close();
+					return;
+				}
+				else
+					lines.back() += " " + strip(line);
+				continue;
+			}
+			line = strip(line);
+			if (!line.empty()) {
+				lines.push_back(line);
+				continue;
+			}
+			break;
+		}
+		// }}}
+		// Header complete; parse it.
+		// Parse request. {{{
+		buffer = buffer.substr(p);
+		auto request = split(lines.front(), 2);
+		if (request.size() != 3 || request[1][0] != '/') {
+			log("Warning: ignoring invalid request " + lines.front());
+			self->socket.close();
+			return;
+		}
+		self->method = upper(request[0]);
+		std::string path = request[1];
+		self->http_version = request[2];
+		for (auto prefix: self->httpd->proxy) {
+			if (startswith(path, "/" + prefix + "/") || path == "/" + prefix) {
+				self->prefix = "/" + prefix;
+				break;
+			}
+		}
+		std::string noprefix_path = path.substr(self->prefix.size());
+		if (noprefix_path.empty() || noprefix_path[0] != '/')
+			noprefix_path = "/" + noprefix_path;
+		// }}}
+		// Store attributes. {{{
+		for (auto line = ++lines.begin(); line != lines.end(); ++line) {
+			p = line->find(':');
+			if (p == std::string::npos) {
+				log("Warning: ignoring http header without : " + *line);
+				continue;
+			}
+			auto key = lower(strip(line->substr(0, p)));
+			auto value = strip(line->substr(p + 1));
+			self->headers[key] = value;
+		}
+		// }}}
+		if (!self->headers.contains("host")) {
+			log("Error in request: no Host header");
+			self->socket.close();
+			return;
+		}
+		std::string host = self->headers["host"];
+		self->url = URL(host + noprefix_path);
+		// Check if authorization is required and provided. {{{
+		auto message = self->httpd->authentication(*self);
+		if (message) {
+			// Authentication required; check if it was present.
+			auto i = self->headers.find("authorization");
+			if (i == self->headers.end()) {
+				// No authorization requested; reply 401.
+				// TODO self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
+				self->socket.close();
+				return;
+			}
+			// Authorization requested; check it.
+			auto data = split(i->second, 1);
+			if (data.size() != 2 || data[0] != "basic") {
+				// Invalid authorization.
+				// TODO self.server.reply(self, 400, close = True)
+				self->socket.close();
+				return;
+			}
+			auto pwdata = data[1]; // TODO:b64decode(data[1]);
+			auto p = pwdata.find(':');
+			if (p == std::string::npos) {
+				// Invalid authorization.
+				// TODO self.server.reply(self, 400, close = True)
+				self->socket.close();
+				return;
+			}
+			self->user = pwdata.substr(0, p);
+			self->password = pwdata.substr(p + 1);
+			if (!self->httpd->valid_credentials(*self)) {
+				// TODO self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
+				self->socket.close();
+				return;
+			}
+		}
+		// Authorization successful or not needed.
+		// }}}
+
+		// Parse request: handle POST. TODO {{{
+		if (self->method == "POST") {
+			// TODO
+			/*if self.method.upper() == 'POST':
 				if 'content-type' not in self.headers or self.headers['content-type'].lower().split(';')[0].strip() != 'multipart/form-data':
 					log('Invalid Content-Type for POST; must be multipart/form-data (not %s)\n' % (self.headers['content-type'] if 'content-type' in self.headers else 'undefined'))
 					self.server.reply(self, 500, close = True)
@@ -297,57 +513,95 @@ class _Httpd_connection:	# {{{
 				self.post = [{}, {}]
 				self.socket.read(self._post)
 				self._post(b'')
-			else:
-				try:
-					if not self.server.page(self):
-						self.socket.close()
-				except:
-					if DEBUG > 0:
-						traceback.print_exc()
-					log('exception: %s\n' % repr(sys.exc_info()[1]))
-					try:
-						self.server.reply(self, 500, close = True)
-					except:
-						self.socket.close()
-			return
-		# Websocket.
-		if self.method.upper() != 'GET' or 'sec-websocket-key' not in self.headers:
-			if DEBUG > 2:
-				log('Debug: invalid websocket')
-			self.server.reply(self, 400, close = True)
-			return
-		newkey = base64.b64encode(hashlib.sha1(self.headers['sec-websocket-key'].strip().encode('utf-8') + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest()).decode('utf-8')
-		headers = {'Sec-WebSocket-Accept': newkey, 'Connection': 'Upgrade', 'Upgrade': 'WebSocket'}
-		self.server.reply(self, 101, None, None, headers, close = False)
-		self.websocket(None, recv = self.server.recv, socket = self.socket, error = self.error, mask = (None, False), websockets = self.server.websockets, data = self.data, real_remote = self.headers.get('x-forwarded-for'))
-	# }}}
-	def _parse_headers(self, message): # {{{
-		lines = []
-		pos = 0
-		while True:
-			p = message.index(b'\r\n', pos)
-			ln = message[pos:p].decode('utf-8', 'replace')
-			pos = p + 2
-			if ln == '':
-				break
-			if ln[0] in ' \t':
-				if len(lines) == 0:
-					log('header starts with continuation')
-				else:
-					lines[-1] += ln
-			else:
-				lines.append(ln)
-		ret = {}
-		for ln in lines:
-			if ':' not in ln:
-				log('ignoring header line without ":": %s' % ln)
-				continue
-			key, value = [x.strip() for x in ln.split(':', 1)]
-			if key.lower() in ret:
-				log('duplicate key in header: %s' % key)
-			ret[key.lower()] = value
-		return ret, message[pos:]
-	# }}}
+				log('Warning: ignoring POST request.')
+				self.reply(connection, 501)
+				return False
+			 */
+		} // }}}
+
+		// Handle request. Options:
+		// - Serve a static page.
+		// - Serve a dynamic page.
+		// - Create a websocket.
+		auto c = self->headers.find("connection");
+		auto u = self->headers.find("upgrade");
+		if (c != self->headers.end() && u != self->headers.end() && lower(c->second) == "upgrade" && lower(u->second) == "websocket") {
+			// This is a websocket.
+			auto k = self->headers.find("sec-websocket-key");
+			if (self->method != "GET" || k == self->headers.end()) {
+				// self.server.reply(self, 400, close = True)
+				self->socket.close();
+				return;
+			}
+			// TODO.
+			// newkey = base64.b64encode(hashlib.sha1(self.headers['sec-websocket-key'].strip().encode('utf-8') + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest()).decode('utf-8')
+			// headers = {'Sec-WebSocket-Accept': newkey, 'Connection': 'Upgrade', 'Upgrade': 'WebSocket'}
+			// self.server.reply(self, 101, None, None, headers, close = False)
+			self->httpd->websockets.emplace_back(*self);
+			return;
+		}
+		// Attempt to serve a dynamic page.
+		if (!self->httpd->page(*self)) {
+			// This was not a dynamic page; attempt to serve a static page.
+			// TODO.
+			self->socket.close();
+			return;
+		}
+	} // }}}
+	static bool connection_error(void *self_ptr) { // {{{
+		Connection *self = reinterpret_cast <Connection *>(self_ptr);
+		// TODO
+		(void)&self;
+		return false;
+	} // }}}
+	Connection(Socket &&socket, Httpd <websocket> *server) : // {{{
+			httpd(server),
+			socket(std::move(socket)),
+			headers{},
+			method{},
+			url{},
+			http_version{},
+			prefix{}
+	{
+		socket.disconnect_cb = ignore_disconnect;
+		socket.user_data = this;
+		socket.read(read_header, connection_error, httpd->loop);
+		if (DEBUG > 2)
+			log((std::ostringstream() << "new connection from " << socket.url.host << ":" << socket.url.service).str());
+	} // }}}
+	void reply(int code, std::string const &message = {}, std::string const &content_type = {}, std::map <std::string, std::string> headers = {}, bool close = false) { // Send HTTP status code and headers, and optionally a message.  {{{
+		/* Reply to a request for a document.
+		There are three ways to call this function:
+		* With a message and content_type.  This will serve the data as a normal page.
+		* With a code that is not 101, and no message or content_type.  This will send an error.
+		* With a code that is 101, and no message or content_type.  This will open a websocket.
+		*/
+		assert(http_response.contains(code));
+		char const *response = http_response[code];
+		//log('Debug: sending reply %d %s for %s\n' % (code, httpcodes[code], connection.address.path))
+		socket.send((std::ostringstream() << "HTTP/1.1 " << code << " " << response << "\n").str());
+		if (message.empty() && code != 101) {
+			assert(content_type.empty());
+			content_type = "text/html;charset=utf-8";
+			message = (std::ostringstream() << "<!DOCTYPE html><html><head><meta charset='utf-8'/><title>" << code << ": " << response << "</title></head><body><h1>" << code << ": " << response << "</h1></body></html>").str();
+		}
+		if (close && !headers.contains("Connection"))
+			headers["Connection"] = "close";
+		if (!content_type.empty()) {
+			headers["Content-Type"] = content_type;
+			headers["Content-Length"] = (std::ostringstream() << message.size()).str();
+		}
+		else {
+			assert(code == 101);
+			assert(message.empty());
+		}
+		for (auto h: headers)
+			socket.send(h.first + ":" + h.second + "\r\n");
+		socket.send("\r\n" + message);
+		if (close)
+			socket.close();
+	} // }}}
+		/* POST internals (removed for now)
 	def _parse_args(self, header): # {{{
 		if ';' not in header:
 			return (header.strip(), {})
@@ -486,7 +740,7 @@ class _Httpd_connection:	# {{{
 				os.remove(g[0])
 		del self.post
 	# }}}
-	def _base64_decoder(self, data, final):	# {{{
+	def _base64_decoder(self, data, final):	// {{{
 		ret = b''
 		pos = 0
 		table = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
@@ -532,250 +786,16 @@ class _Httpd_connection:	# {{{
 			pos = len(data) - 2
 		return (ret, data[pos:])
 	# }}}
-# }}}
-class Httpd: # {{{
-	'''HTTP server.
-	This object implements an HTTP server.  It supports GET and
-	POST, and of course websockets.
-	'''
-	def __init__(self, port, recv = None, httpdirs = None, server = None, proxy = (), http_connection = _Httpd_connection, websocket = Websocket, error = None, *a, **ka): # {{{
-		'''Create a webserver.
-		Additional arguments are passed to the network.Server.
-		@param port: Port to listen on.  Same format as in
-			python-network.
-		@param recv: Communication object class for new
-			websockets.
-		@param httpdirs: Locations of static web pages to
-			serve.
-		@param server: Server to use, or None to start a new
-			server.
-		@param proxy: Tuple of virtual proxy prefixes that
-			should be ignored if requested.
-		'''
-		## Communication object for new websockets.
-		self.recv = recv
-		self._http_connection = http_connection
-		## Sequence of directories that that are searched to serve.
-		# This can be used to make a list of files that are available to the web server.
-		self.httpdirs = httpdirs
-		self._proxy = proxy
-		self._websocket = websocket
-		self._error = error if error is not None else lambda msg: print(msg)
-		## Extensions which are handled from httpdirs.
-		# More items can be added by the user program.
-		self.exts = {}
-		# Automatically add all extensions for which a mime type exists.
-		try:
-			exts = {}
-			with open('/etc/mime.types') as f:
-				for ln in f:
-					if ln.strip() == '' or ln.startswith('#'):
-						continue
-					items = ln.split()
-					for ext in items[1:]:
-						if ext not in exts:
-							exts[ext] = items[0]
-						else:
-							# Multiple registration: don't choose one.
-							exts[ext] = False
-		except FileNotFoundError:
-			# This is probably a Windows system; use some defaults.
-			exts = { 'html': 'text/html', 'css': 'text/css', 'js': 'text/javascript', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'bmp': 'image/bmp', 'gif': 'image/gif', 'pdf': 'application/pdf', 'svg': 'image/svg+xml', 'txt': 'text/plain'}
-		for ext in exts:
-			if exts[ext] is not False:
-				if exts[ext].startswith('text/') or exts[ext] == 'application/javascript':
-					self.handle_ext(ext, exts[ext] + ';charset=utf-8')
-				else:
-					self.handle_ext(ext, exts[ext])
-		## Currently connected websocket connections.
-		self.websockets = set()
-		if server is None:
-			## network.Server object.
-			self.server = network.Server(port, self, *a, **ka)
-		else:
-			self.server = server
-	# }}}
-	def __call__(self, socket): # {{{
-		'''Add socket to list of accepted connections.
-		Primarily useful for adding standard input and standard
-		output as a fake socket.
-		@param socket: Socket to add.
-		@return New connection object.
-		'''
-		return self._http_connection(self, socket, proxy = self._proxy, websocket = self._websocket, error = self._error)
-	# }}}
-	def handle_ext(self, ext, mime): # {{{
-		'''Add file extension to handle successfully.
-		Files with this extension in httpdirs are served to
-		callers with a 200 Ok code and the given mime type.
-		This is a convenience function for adding the item to
-		exts.
-		@param ext: The extension to serve.
-		@param mime: The mime type to use.
-		@return None.
-		'''
-		self.exts[ext] = lambda socket, message: self.reply(socket, 200, message, mime)
-	# }}}
-	# Authentication. {{{
-	## Authentication message.  See authenticate() for details.
-	auth_message = None
-	def authenticate(self, connection): # {{{
-		'''Handle user authentication.
-		To use authentication, set auth_message to a static message
-		or define it as a method which returns a message.  The method
-		is called with two arguments, connection and is_websocket.
-		If it is or returns a True value (when cast to bool),
-		authenticate will be called, which should return a bool.  If
-		it returns False, the connection will be rejected without
-		notifying the program.
+		  */
+}; // }}}
 
-		connection.data is a dict which contains the items 'user' and
-		'password', set to their given values.  This dict may be
-		changed by authenticate and is passed to the websocket.
-		Apart from filling the initial contents, this module does not
-		touch it.  Note that connection.data is empty when
-		auth_message is called.  'user' and 'password' will be
-		overwritten before authenticate is called, but other items
-		can be added at will.
+template <class websocket>
+void Httpd <websocket>::new_connection(Socket &&remote, void *self_ptr) { // {{{
+	auto self = reinterpret_cast <Httpd <websocket> *>(self_ptr);
+	self->connections.emplace_back(std::move(remote), self);
+} // }}}
 
-		***********************
-		NOTE REGARDING SECURITY
-		***********************
-		The module uses plain text authentication.  Anyone capable of
-		seeing the data can read the usernames and passwords.
-		Therefore, if you want authentication, you will also want to
-		use TLS to encrypt the connection.
-		@param connection: The connection to authenticate.
-			Especially connection.data['user'] and
-			connection.data['password'] are of interest.
-		@return True if the authentication succeeds, False if
-			it does not.
-		'''
-		return True
-	# }}}
-	# }}}
-	# The following function can be called by the overloaded page function.
-	def reply(self, connection, code, message = None, content_type = None, headers = None, close = False):	# Send HTTP status code and headers, and optionally a message.  {{{
-		'''Reply to a request for a document.
-		There are three ways to call this function:
-		* With a message and content_type.  This will serve the
-		  data as a normal page.
-		* With a code that is not 101, and no message or
-		  content_type.  This will send an error.
-		* With a code that is 101, and no message or
-		  content_type.  This will open a websocket.
-		@param connection: Requesting connection.
-		@param code: HTTP response code to send.  Use 200 for a
-			valid page.
-		@param message: Data to send (as bytes), or None for an
-			error message just showing the response code
-			and its meaning.
-		@param content_type: Content-Type of the message, or
-			None if message is None.
-		@param headers: Headers to send in addition to
-			Content-Type and Content-Length, or None for no
-			extra headers.
-		@param close: True if the connection should be closed after
-			this reply.
-		@return None.
-		'''
-		assert code in httpcodes
-		#log('Debug: sending reply %d %s for %s\n' % (code, httpcodes[code], connection.address.path))
-		connection.socket.send(('HTTP/1.1 %d %s\r\n' % (code, httpcodes[code])).encode('utf-8'))
-		if headers is None:
-			headers = {}
-		if message is None and code != 101:
-			assert content_type is None
-			content_type = 'text/html; charset=utf-8'
-			message = ('<!DOCTYPE html><html><head><title>%d: %s</title></head><body><h1>%d: %s</h1></body></html>' % (code, httpcodes[code], code, httpcodes[code])).encode('utf-8')
-		if close and 'Connection' not in headers:
-			headers['Connection'] = 'close'
-		if content_type is not None:
-			headers['Content-Type'] = content_type
-			headers['Content-Length'] = '%d' % len(message)
-		else:
-			assert code == 101
-			message = b''
-		connection.socket.send((''.join(['%s: %s\r\n' % (x, headers[x]) for x in headers]) + '\r\n').encode('utf-8') + message)
-		if close:
-			connection.socket.close()
-	# }}}
-	# If httpdirs is not given, or special handling is desired, this can be overloaded.
-	def page(self, connection, path = None):	# A non-WebSocket page was requested.  Use connection.address, connection.method, connection.query, connection.headers and connection.body (which should be empty) to find out more.  {{{
-		'''Serve a non-websocket page.
-		Overload this function for custom behavior.  Call this
-		function from the overloaded function if you want the
-		default functionality in some cases.
-		@param connection: The connection that requests the
-			page.  Attributes of interest are
-			connection.address, connection.method,
-			connection.query, connection.headers and
-			connection.body (which should be empty).
-		@param path: The requested file.
-		@return True to keep the connection open after this
-			request, False to close it.
-		'''
-		if self.httpdirs is None:
-			self.reply(connection, 501)
-			return
-		if path is None:
-			path = connection.address.path
-		if path == '/':
-			address = 'index'
-		else:
-			address = '/' + unquote(path) + '/'
-			while '/../' in address:
-				# Don't handle this; just ignore it.
-				pos = address.index('/../')
-				address = address[:pos] + address[pos + 3:]
-			address = address[1:-1]
-		if '.' in address.rsplit('/', 1)[-1]:
-			base, ext = address.rsplit('.', 1)
-			base = base.strip('/')
-			if ext not in self.exts and None not in self.exts:
-				log('not serving unknown extension %s' % ext)
-				self.reply(connection, 404)
-				return
-			for d in self.httpdirs:
-				filename = os.path.join(d, base + os.extsep + ext)
-				if os.path.exists(filename):
-					break
-			else:
-				log('file %s not found in %s' % (base + os.extsep + ext, ', '.join(self.httpdirs)))
-				self.reply(connection, 404)
-				return
-		else:
-			base = address.strip('/')
-			for ext in self.exts:
-				for d in self.httpdirs:
-					filename = os.path.join(d, base if ext is None else base + os.extsep + ext)
-					if os.path.exists(filename):
-						break
-				else:
-					continue
-				break
-			else:
-				log('no file %s (with supported extension) found in %s' % (base, ', '.join(self.httpdirs)))
-				self.reply(connection, 404)
-				return
-		return self.exts[ext](connection, open(filename, 'rb').read())
-	# }}}
-	def post(self, connection):	# A non-WebSocket page was requested with POST.  Same as page() above, plus connection.post, which is a dict of name:(headers, sent_filename, local_filename).  When done, the local files are unlinked; remove the items from the dict to prevent this.  The default is to return an error (so POST cannot be used to retrieve static pages!) {{{
-		'''Handle POST request.
-		This function responds with an error by default.  It
-		must be overridden to handle POST requests.
-
-		@param connection: Same as for page(), plus connection.post, which is a 2-tuple.
-			The first element is a dict of name:['value', ...] for fields without a file.
-			The second element is a dict of name:[(local_filename, remote_filename), ...] for fields with a file.
-			When done, the local files are unlinked; remove the items from the dict to prevent this.
-		@return True to keep connection open after this request, False to close it.
-		'''
-		log('Warning: ignoring POST request.')
-		self.reply(connection, 501)
-		return False
-	# }}}
-# }}}
+/*
 class RPChttpd(Httpd): # {{{
 	'''Http server which serves websockets that implement RPC.
 	'''

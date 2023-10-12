@@ -15,26 +15,6 @@
 
 #include "websocketd.hh"
 
-// Debug level, set from DEBUG environment variable.
-// * 0: No debugging (default).
-// * 1: Tracebacks on errors.
-// * 2: Incoming and outgoing RPC packets.
-// * 3: Incomplete packet information.
-// * 4: All incoming and outgoing data.
-// * 5: Non-websocket data.
-int DEBUG = 0;
-
-std::string strip(std::string const &src, std::string const &chars) { // {{{
-	auto first = src.find_first_not_of(chars);
-	if (first == std::string::npos)
-		return std::string();
-	auto last = src.find_last_not_of(chars);
-	auto ret = src.substr(first, last - first + 1);
-	if (DEBUG > 4)
-		log("stripped: '" + ret + "'");
-	return ret;
-} // }}}
-
 // Websocket internals. {{{
 void Websocket::disconnect(void *self_ptr) { // {{{
 	STARTFUNC;
@@ -110,21 +90,13 @@ Websocket::Websocket(std::string const &address, Receiver receiver, Settings con
 	std::string userpwd;
 	if (!settings.user.empty() || !settings.password.empty())
 		userpwd = settings.user + ":" + settings.password + "\r\n";
-	std::string url = socket.extra;
-	if (url.empty())
-		url = "/";
-	else if (url[0] != '/')
-		url = "/" + url;
-	std::string host = socket.hostname;
-	if (socket.service != socket.protocol)
-		host += ":" + socket.service;
 	// Sec-Websocket-Key is not random, because that has no
 	// value. The example value from the RFC is used.
 	// Differently put: it uses a special random generator
 	// which always returns range(0x01, 0x11).
 	socket.send(
-		settings.method + " " + url + " HTTP/1.1\r\n"
-		"Host: " + host + "\r\n"
+		settings.method + " " + socket.url.build_request() + " HTTP/1.1\r\n"
+		"Host: " + socket.url.build_host() + "\r\n"
 		"Upgrade: websocket\r\n"
 		"Connection: Upgrade\r\n"
 		"Sec-WebSocket-Key: AQIDBAUGBwgJCgsMDQ4PEC==\r\n"
@@ -542,7 +514,7 @@ void RPC::activate() { // {{{
 		auto calls = std::move(delayed_calls);
 		delayed_calls.clear();
 		for (auto this_call: calls) {
-			if (published_fn.contains(this_call.target) || published_co.contains(this_call.target))
+			if (published.contains(this_call.target))
 				called(this_call.code, this_call.target, this_call.args, this_call.kwargs);
 			else
 				log("error: invalid delayed call frame");
@@ -728,18 +700,10 @@ void RPC::called(int id, std::string const &target, std::shared_ptr <WebVector> 
 	@param ka: Keyword arguments.
 	@return None.
 	*/
-	// Try to call target function.
-	auto fn = published_fn.find(target);
-	if (fn != published_fn.end()) {
-		auto ret = fn->second(args, kwargs, user_data);
-		if (id != 0)
-			send("return", WebVector::create(WebInt::create(id), ret));
-		return;
-	}
 
 	// Try to call target coroutine.
-	auto co = published_co.find(target);
-	if (co != published_co.end()) {
+	auto co = published.find(target);
+	if (co != published.end()) {
 		auto c = co->second(args, kwargs, user_data);
 		if (id != 0)
 			c.set_cb(call_return, new IdSelf(id, this));
@@ -758,13 +722,12 @@ void RPC::fgcb(std::shared_ptr <WebObject> ret, void *user_data) { // {{{
 	delete handle;
 } // }}}
 
-RPC::RPC(std::string const &address, std::map <std::string, PublishedFn> const &published_fn, std::map <std::string, PublishedCo> const &published_co, ErrorCb error, void *user_data, Websocket::Settings const &settings) : // {{{
+RPC::RPC(std::string const &address, std::map <std::string, Published> const &published, ErrorCb error, void *user_data, Websocket::Settings const &settings) : // {{{
 		Websocket(address, recv, settings, this),
 		error(error),
 		delayed_calls{},
 		activated(false),
-		published_fn(published_fn),
-		published_co(published_co),
+		published(published),
 		groups{},
 		user_data(user_data)
 {

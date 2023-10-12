@@ -1,5 +1,5 @@
-TARGETS = test-fhs test-network test-network-server test-rpc
-PARTS = coroutine fhs network webobject websocketd
+TARGETS = test-httpd test-fhs test-network test-network-server test-rpc
+PARTS = websocketd coroutine fhs network webobject url tools loop
 
 HEADERS = $(addprefix ../include/,$(addsuffix .hh,${PARTS}))
 OBJECTS = $(addprefix build/,$(addsuffix .o,${PARTS}))

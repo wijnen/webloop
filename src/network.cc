@@ -58,186 +58,6 @@ sockets.  Connection targets can be specified in several ways.
 // - Socket: used for connection; symmetric
 // }}} */
 
-// Logging. {{{
-std::ostream *log_output = &std::cerr;
-bool log_date = false;
-
-void set_log_output(std::ostream &target) { // {{{
-	/* Change target for log().
-	By default, log() sends its output to standard error.  This function is
-	used to change the target.
-	@param file: The new file to write log output to.
-	@return None.
-	*/
-	log_output = &target;
-	log_date = true;
-} // }}}
-
-void log_impl(std::string const &message, std::string const &filename, std::string const &funcname, int line) { // {{{
-	/* Log a message.
-	Write a message to log (default standard error, can be changed with
-	set_log_output()).  A timestamp is added before the message and a
-	newline is added to it.
-	@param message: The message to log. Multiple arguments are logged on separate lines. Newlines in arguments cause the message to be split, so they should not contain a closing newline.
-	@param filename: Override filename to report.
-	@param line: Override line number to report.
-	@param funcname: Override function name to report.
-	@param depth: How deep to enter into the call stack for function info.
-	@return None.
-	*/
-	char buffer[100];
-	auto t = std::time(nullptr);
-	strftime(buffer, sizeof(buffer), log_date ? "%F %T" : "%T", std::gmtime(&t));
-	(*log_output) << buffer << ": " << filename << ":" << line << ":" << funcname << ": " << message << std::endl;
-} // }}}
-// }}}
-
-// Main loop. {{{
-int PollItems::add(Item *item) { // {{{
-	// Add an fd; return index.
-	size_t ret;
-	if (!empty_items.empty()) {
-		// There is space at a removed index.
-		ret = *empty_items.begin();
-		empty_items.erase(empty_items.begin());
-	}
-	else {
-		if (num == capacity) {
-			// There is no space; extend capacity.
-			capacity *= 8;
-			struct pollfd *new_data = new struct pollfd[capacity];
-			for (int i = 0; i < num; ++i)
-				new_data[i] = data[i];
-			delete[] data;
-			data = new_data;
-		}
-		// Now there is space at the end.
-		ret = num++;
-	}
-	data[ret].fd = item->fd;
-	data[ret].events = item->events;
-	// Add item
-	if (ret < items.size())
-		items[ret] = item;
-	else {
-		assert(ret == items.size());
-		items.push_back(item);
-	}
-	item->handle = ret;
-	return ret;
-} // }}}
-
-void PollItems::remove(int index) { // {{{
-	// Remove fd using index as returned by add.
-	assert(data[index].fd >= 0);
-	if (index == num - 1) {
-		--num;
-		items.pop_back();
-		// Remove newly last elements if they were empty.
-		while (!empty_items.empty() && *empty_items.end() == num - 1) {
-			empty_items.erase(empty_items.end());
-			--num;
-			items.pop_back();
-		}
-		// Shrink capacity if too many items are removed.
-		if (num * 8 * 2 < capacity && capacity > min_capacity) {
-			capacity /= 8;
-			struct pollfd *new_data = new struct pollfd[capacity];
-			for (int i = 0; i < num; ++i)
-				new_data[i] = data[i];
-			delete[] data;
-			data = new_data;
-		}
-		return;
-	}
-	data[index].fd = -1;
-	empty_items.insert(index);
-} // }}}
-
-int Loop::handle_timeouts() { // {{{
-	Time current = now();
-	while (!aborting && !timeouts.empty() && timeouts.begin()->time <= current) {
-		TimeoutRecord rec = *timeouts.begin();
-		timeouts.erase(timeouts.begin());
-		bool keep = rec.cb(rec.user_data);
-		if (keep && rec.interval > Duration()) {
-			while (rec.time <= current)
-				rec.time += rec.interval;
-			add_timeout({rec.time, rec.interval, rec.cb, rec.user_data});
-		}
-	}
-	if (timeouts.empty())
-		return -1;
-	return (timeouts.begin()->time - current) / 1ms;
-} // }}}
-
-void Loop::iteration(bool block) { // {{{
-	// Do a single iteration of the main loop.
-	// @return None.
-	int t = handle_timeouts();
-	if (!block)
-		t = 0;
-	poll(items.data, items.num, t);
-	for (int i = 0; !aborting && i < items.num; ++i) {
-		if (items.data[i].fd < 0)
-			continue;
-		short ev = items.data[i].revents;
-		if (ev == 0)
-			continue;
-		if (ev & (POLLERR | POLLNVAL)) {
-			if (!items.items[i]->error || !items.items[i]->error(items.items[i]->user_data))
-				items.remove(i);
-		}
-		else {
-			if (ev & (POLLIN | POLLPRI)) {
-				if (!items.items[i]->read || !items.items[i]->read(items.items[i]->user_data)) {
-					items.remove(i);
-					continue;
-				}
-			}
-			if (ev & POLLOUT) {
-				if (!items.items[i]->write || !items.items[i]->write(items.items[i]->user_data))
-					items.remove(i);
-			}
-		}
-	}
-	handle_timeouts();
-} // }}}
-
-void Loop::run() { // {{{
-	// Wait for events and handle them.
-	// @return None.
-	assert(!running);
-	running = true;
-	aborting = false;
-	while (running) {
-		iteration(idle.empty());
-		if (!running)
-			continue;
-		for (auto i = idle.begin(); i != idle.end(); ++i) {
-			if (!i->cb(i->user_data))
-				remove_idle(i);
-			if (!running)
-				break;
-		}
-	}
-	running = false;
-	aborting = false;
-}
-// }}}
-
-void Loop::stop(bool force) { // {{{
-	// Stop a running loop.
-	// @return None.
-	assert(running);
-	running = false;
-	if (force)
-		aborting = true;
-} // }}}
-
-Loop *Loop::default_loop;
-// }}}
-
 // Network sockets. {{{
 bool Socket::read_impl(void *self_ptr) { // {{{
 	Socket *self = reinterpret_cast <Socket *>(self_ptr);
@@ -274,13 +94,14 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 	:
 		fd(-1),
 		mymaxsize(4096),
-		user_data(user_data),
 		read_item({nullptr, -1, 0, nullptr, nullptr, nullptr, -1}),
 		read_cb(nullptr),
 		buffer(),
 		server(nullptr),
 		server_data(),
-		disconnect_cb(nullptr)
+		disconnect_cb(nullptr),
+		user_data(user_data),
+		url(address)
 {
 	/* Create a connection.
 	@param address: connection target.  This is a unix domain
@@ -290,59 +111,18 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 	localhost is used.
 	*/
 
-	// Parse string.
-	auto p = address.find("://");
-	if (p != std::string::npos) {
-		protocol = address.substr(0, p);
-		p += 3;
+	if (url.unix.empty() && url.service.empty()) {
+		url.service = std::move(url.host);
+		url.host = "localhost";
 	}
-	else
-		p = 0;
 
-	auto q = address.find_first_of(":/?#", p);
-	if (q == std::string::npos) {
-		hostname = address.substr(p);
-		service = protocol;
-	}
-	else {
-		hostname = address.substr(p, q - p);
-		if (address[q] == ':') {
-			p = q + 1;
-			q = address.find_first_of("/?#", p);
-			if (q == std::string::npos)
-				service = address.substr(p);
-			else {
-				service = address.substr(p, q - p);
-				extra = address.substr(q);
-			}
-		}
-		else {
-			service = protocol;
-			extra = address.substr(q);
-		}
-	}
-	
-	if (protocol.empty() && service.empty() && !extra.empty()) {
-		// Unix domain socket.
-		protocol.clear();
-		hostname.clear();
-		service = address;
-		extra.clear();
-	}
-	else {
-		if (service.empty()) {
-			service = hostname;
-			hostname = "localhost";
-		}
-	}
-	
 	// Set up the connection.
-	if (hostname.empty()) {
+	if (!url.unix.empty()) {
 		// Unix domain socket.
 		fd = socket(AF_UNIX, SOCK_STREAM, 0);
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, service.c_str(), sizeof(addr.sun_path));
+		strncpy(addr.sun_path, url.unix.c_str(), sizeof(addr.sun_path));
 		connect(fd, reinterpret_cast <sockaddr *>(&addr), sizeof(addr));
 	}
 	else {
@@ -352,9 +132,9 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 		addr_hint.ai_protocol = IPPROTO_TCP;
 		addr_hint.ai_flags = AI_ADDRCONFIG | AI_V4MAPPED;
 		struct addrinfo *addr;
-		int code = getaddrinfo(hostname.c_str(), service.c_str(), &addr_hint, &addr);
+		int code = getaddrinfo(url.host.c_str(), url.service.c_str(), &addr_hint, &addr);
 		if (code != 0) {
-			std::cerr << protocol << " / " << hostname << " / " << service << " / " << extra << std::endl;
+			std::cerr << url.src << std::endl;
 			std::cerr << "unable to open socket: " << gai_strerror(code) << std::endl;
 			throw "unable to open socket";
 		}
@@ -367,7 +147,7 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 			}
 			if (connect(fd, rp->ai_addr, rp->ai_addrlen) < 0) {
 				if (!rp->ai_next || errno != ECONNREFUSED) {
-					std::cerr << protocol << " / " << hostname << " / " << service << " / " << extra << std::endl;
+					std::cerr << url.src << std::endl;
 					std::cerr << "unable to connect socket: " << strerror(errno) << std::endl;
 				}
 				fd = -1;
@@ -380,6 +160,48 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 			throw "unable to connect any socket";
 		}
 	}
+} // }}}
+
+Socket::Socket(Socket &&other) : // {{{
+		fd(other.fd),
+		mymaxsize(other.mymaxsize),
+		current_loop(other.current_loop),
+		read_item(std::move(other.read_item)),
+		read_cb(other.read_cb),
+		buffer(std::move(other.buffer)),
+		server(other.server),
+		server_data(std::move(other.server_data)),
+		disconnect_cb(other.disconnect_cb),
+		user_data(other.user_data)
+{
+	other.fd = -1;
+	*server_data = this;
+	if (read_item.user_data == &other) {
+		read_item.user_data = this;
+		current_loop->update_io(read_item.handle, this);
+	}
+} // }}}
+
+Socket &Socket::operator=(Socket &&other) { // {{{
+	fd = other.fd;
+	other.fd = -1;
+	mymaxsize = other.mymaxsize;
+	current_loop = other.current_loop;
+	read_item = std::move(other.read_item);
+	read_cb = other.read_cb;
+	buffer = std::move(other.buffer);
+	server = other.server;
+	server_data = std::move(other.server_data);
+	disconnect_cb = other.disconnect_cb;
+	user_data = other.user_data;
+
+	other.read_item.handle = -1;
+	*server_data = this;
+	if (read_item.user_data == &other) {
+		read_item.user_data = this;
+		current_loop->update_io(read_item.handle, this);
+	}
+	return *this;
 } // }}}
 
 std::string Socket::close() { // {{{
@@ -459,7 +281,7 @@ std::string Socket::recv() { // {{{
 	return std::string(buffer, num);
 } // }}}
 
-std::string Socket::rawread(Item::Cb cb, Item::Cb error, Loop *loop, void *udata) { // {{{
+std::string Socket::rawread(Loop::Cb cb, Loop::Cb error, Loop *loop, void *udata) { // {{{
 	/* Register function to be called when data is ready for reading.
 	The function will be called when data is ready.  The callback
 	must read the function or call unread(), or it will be called
@@ -470,14 +292,14 @@ std::string Socket::rawread(Item::Cb cb, Item::Cb error, Loop *loop, void *udata
 	*/
 	if (fd < 0)
 		return std::string();
-	loop = Loop::get(loop);
-	std::string ret = unread(loop);
-	read_item = Item {udata ? udata : user_data, fd, POLLIN | POLLPRI, cb, nullptr, error, -1};
-	read_item.handle = loop->add_io(read_item);
+	current_loop = Loop::get(loop);
+	std::string ret = unread();
+	read_item = Loop::IoRecord {udata ? udata : user_data, fd, POLLIN | POLLPRI, cb, nullptr, error, -1};
+	read_item.handle = current_loop->add_io(read_item);
 	return ret;
 } // }}}
 
-void Socket::read(ReadCb callback, Item::Cb error, Loop *loop, size_t maxsize) { // {{{
+void Socket::read(ReadCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
 	/* Register function to be called when data is received.
 	When data is available, read it and call this function.  The
 	data that was remaining in the line buffer, if any, is sent to
@@ -491,16 +313,16 @@ void Socket::read(ReadCb callback, Item::Cb error, Loop *loop, size_t maxsize) {
 	*/
 	if (fd < 0)
 		return;
-	loop = Loop::get(loop);
-	std::string first = unread(loop);
+	current_loop = Loop::get(loop);
+	std::string first = unread();
 	mymaxsize = maxsize;
 	read_cb = callback;
-	rawread(read_impl, error, loop, this);
+	rawread(read_impl, error, current_loop, this);
 	if (!first.empty())
 		read_cb(first, user_data);
 } // }}}
 
-void Socket::read_lines(ReadLinesCb callback, Item::Cb error, Loop *loop, size_t maxsize) { // {{{
+void Socket::read_lines(ReadLinesCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
 	/* Buffer incoming data until a line is received, then call a function.
 	When a newline is received, all data up to that point is
 	decoded as an utf-8 string and passed to the callback.
@@ -515,24 +337,23 @@ void Socket::read_lines(ReadLinesCb callback, Item::Cb error, Loop *loop, size_t
 	*/
 	if (fd < 0)
 		return;
-	loop = Loop::get(loop);
-	std::string first = unread(loop);
+	current_loop = Loop::get(loop);
+	std::string first = unread();
 	mymaxsize = maxsize;
 	read_lines_cb = callback;
-	rawread(read_lines_impl, error, loop, this);
+	rawread(read_lines_impl, error, current_loop, this);
 	if (!first.empty())
 		handle_read_line_data(std::move(first));
 } // }}}
 
-std::string Socket::unread(Loop *loop) { // {{{
+std::string Socket::unread() { // {{{
 	/* Cancel a read() or rawread() callback.
 	Cancel any read callback.
 	@return Bytes left in the line buffer, if any.  The line buffer
 		is cleared.
 	*/
-	loop = Loop::get(loop);
 	if (read_item.handle >= 0) {
-		loop->remove_io(read_item.handle);
+		current_loop->remove_io(read_item.handle);
 		read_item.handle = -1;
 	}
 	std::string ret = std::move(buffer);
@@ -541,8 +362,9 @@ std::string Socket::unread(Loop *loop) { // {{{
 } // }}}
 // }}}
 
-void Server::remote_disconnect(std::list <Socket>::iterator socket) { // {{{
-	socket->server = nullptr;
+// Network server. {{{
+void Server::remote_disconnect(std::list <Socket *>::iterator socket) { // {{{
+	(*socket)->server = nullptr;
 	remotes.erase(socket);
 } // }}}
 
@@ -563,7 +385,7 @@ void Server::open_socket(std::string const &service, int backlog) { // {{{
 			std::cerr << "unable to bind unix socket: " << strerror(errno) << std::endl;
 			throw "unable to open socket";
 		}
-		listeners.emplace(listeners.end(), fd, Socket {fd, this});
+		listeners.emplace_back(this, fd);
 		return;
 	}
 	struct addrinfo addr_hint;
@@ -594,7 +416,7 @@ void Server::open_socket(std::string const &service, int backlog) { // {{{
 			::close(fd);
 			continue;
 		}
-		listeners.emplace(listeners.end(), fd, Socket {fd, this});
+		listeners.emplace_back(this, fd);
 	}
 	freeaddrinfo(addr);
 	if (listeners.empty()) {
@@ -604,17 +426,17 @@ void Server::open_socket(std::string const &service, int backlog) { // {{{
 } // }}}
 
 bool Server::accept_remote(void *self_ptr) { // {{{
-	Acceptor *acceptor = reinterpret_cast <Acceptor *>(self_ptr);
-	Server *self = acceptor->server;
+	Listener *listener = reinterpret_cast <Listener *>(self_ptr);
+	Server *self = listener->server;
 	struct sockaddr_un addr;	// Use largest struct; cast down for others.
 	socklen_t addrlen = sizeof(addr);
-	int fd = ::accept(acceptor->listener->fd, reinterpret_cast <struct sockaddr *>(&addr), &addrlen);
+	int fd = ::accept(listener->fd, reinterpret_cast <struct sockaddr *>(&addr), &addrlen);
 	if (addrlen > sizeof(addr)) {
 		std::cerr << "Warning: remote address is truncated" << std::endl;
 		addrlen = sizeof(addr);
 	}
-	self->remotes.emplace(self->remotes.end(), fd, self->user_data);
-	Socket &remote = self->remotes.back();
+	Socket remote(fd, self->user_data);
+	self->remotes.push_back(&remote);
 	remote.server = self;
 	remote.server_data = --self->remotes.end();
 	switch (addr.sun_family) {
@@ -623,13 +445,13 @@ bool Server::accept_remote(void *self_ptr) { // {{{
 		struct sockaddr_in *addr4 = reinterpret_cast <struct sockaddr_in *>(&addr);
 		std::ostringstream p;
 		p << addr4->sin_port;
-		remote.service = p.str();
+		remote.url.service = p.str();
 		char buffer[INET_ADDRSTRLEN];
 		if (!inet_ntop(addr4->sin_family, &addr4->sin_addr, buffer, sizeof(buffer))) {
 			std::cerr << "unable to parse IPv4 address" << std::endl;
 			break;
 		}
-		remote.hostname = buffer;
+		remote.url.host = buffer;
 		break;
 	}
 	case AF_INET6:
@@ -637,44 +459,51 @@ bool Server::accept_remote(void *self_ptr) { // {{{
 		struct sockaddr_in6 *addr6 = reinterpret_cast <struct sockaddr_in6 *>(&addr);
 		std::ostringstream p;
 		p << addr6->sin6_port;
-		remote.service = p.str();
+		remote.url.service = p.str();
 		char buffer[INET6_ADDRSTRLEN];
 		if (!inet_ntop(addr6->sin6_family, &addr6->sin6_addr, buffer, sizeof(buffer))) {
 			std::cerr << "unable to parse IPv6 address" << std::endl;
 			break;
 		}
-		remote.hostname = buffer;
+		remote.url.host = buffer;
 		break;
 	}
 	case AF_UNIX:
 	{
 		addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
-		remote.hostname = addr.sun_path;
+		remote.url.unix = addr.sun_path;
 		break;
 	}
 	default:
 		std::cerr << "unknown address family for remote socket; not reading remote details." << std::endl;
 		break;
 	}
-	self->connected_cb(remote, self->user_data);
+	self->connected_cb(std::move(remote), self->user_data);
 	return true;
 } // }}}
 
-Server::Server(std::string const &service, ConnectedCb cb, Item::Cb error, void *user_data, Loop *loop, int backlog) : listeners(), backlog(backlog), user_data(user_data), connected_cb(cb), remotes() {
+Server::Server(std::string const &service, ConnectedCb cb, Loop::Cb error, void *user_data, Loop *loop, int backlog) : // {{{
+		listenloop(Loop::get(loop)),
+		listeners(),
+		backlog(backlog),
+		user_data(user_data),
+		connected_cb(cb),
+		remotes()
+{
 	open_socket(service, backlog);
 	for (auto i = listeners.begin(); i != listeners.end(); ++i) {
-		i->acceptor = Acceptor {this, i};
-		i->socket.rawread(accept_remote, error, loop, &i->acceptor);
+		i->server = this;
+		i->socket.rawread(accept_remote, error, listenloop, &*i);
 	}
-}
+} // }}}
 
-void Server::close() {
+void Server::close() { // {{{
 	assert(!listeners.empty());
 	while (!remotes.empty())
-		remotes.back().close();
+		remotes.back()->close();
 	while (!listeners.empty()) {
 		listeners.back().socket.close();
 		listeners.pop_back();
 	}
-}
+} // }}}
 // }}}
