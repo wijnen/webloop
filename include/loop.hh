@@ -6,35 +6,47 @@
 #include <vector>
 #include <chrono>
 #include <poll.h>
+#include <cassert>
 
 class Loop {
 public:
 	// Types. {{{
+	struct CbBase {};	// Classes that provide callbacks should inherit from this.
 	typedef std::chrono::time_point <std::chrono::steady_clock> Time;
 	typedef std::chrono::steady_clock::duration Duration;
-	typedef bool (*Cb)(void *user_data);
+	typedef bool (CbBase::*Cb)();
 
 	struct IoRecord { // {{{
-		void *user_data;
+		CbBase *object;
 		int fd;
 		short events;
 		Cb read;
 		Cb write;
 		Cb error;
 		int handle;
+		template <class UserType>
+		IoRecord(UserType *obj, int fd, short events, bool (UserType::*r)(), bool (UserType::*w)(), bool (UserType::*e)()) :
+			object(reinterpret_cast <CbBase *>(obj)),
+			fd(fd),
+			events(events),
+			read(reinterpret_cast <bool (CbBase::*)()>(r)),
+			write(reinterpret_cast <bool (CbBase::*)()>(w)),
+			error(reinterpret_cast <bool (CbBase::*)()>(e)),
+			handle(-1)
+		{}
 	}; // }}}
 
 	struct IdleRecord {
+		CbBase *object;
 		Cb cb;
-		void *user_data;
 	};
 	typedef std::list <IdleRecord>::iterator IdleHandle;
 
 	struct TimeoutRecord {
 		Time time;
 		Duration interval;	// 0 for single shot.
+		CbBase *object;
 		Cb cb;
-		void *user_data;
 		bool operator<(TimeoutRecord const &other) const { return time < other.time; }
 	};
 	typedef std::list <TimeoutRecord>::iterator TimeoutHandle;
@@ -52,8 +64,9 @@ private:
 		std::set <int> empty_items;	// Empty items that have lower index than num - 1.
 		PollItems(int initial_capacity = 32) : data(new struct pollfd[initial_capacity]), num(0), capacity(initial_capacity), min_capacity(initial_capacity) {}
 		int add(IoRecord *item);
-		void update(int handle, void *user_data) { items[handle]->user_data = user_data; }
+		void update(int handle, CbBase *object) { assert(items[handle]->fd < 0); items[handle]->object = object; }
 		void remove(int index);
+		std::string print();
 	}; // }}}
 
 	static Loop *default_loop;
@@ -76,9 +89,8 @@ public:
 	TimeoutHandle add_timeout(TimeoutRecord const &timeout) { timeouts.push_back(timeout); return --timeouts.end(); }
 	IdleHandle add_idle(IdleRecord const &record) { idle.push_back(record); return --idle.end(); }
 
-	void update_io(IoHandle handle, void *user_data) { items.update(handle, user_data); }
-	void update_timeout(TimeoutHandle handle, void *user_data) { handle->user_data = user_data; }
-	void update_idle(IdleHandle handle, void *user_data) { handle->user_data = user_data; }
+	void update_io(IoHandle handle, CbBase *object) { items.update(handle, object); }
+	// Update is only allowed when the item is not active, and Timeout and Idle do not have a handle when inactive, so they can't be updated.
 
 	void remove_io(IoHandle handle) { items.remove(handle); }
 	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }

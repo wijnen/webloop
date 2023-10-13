@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <iostream>
 
 // Debug level, set from DEBUG environment variable.
 // * 0: No debugging (default).
@@ -12,6 +13,9 @@
 // * 4: All incoming and outgoing data.
 // * 5: Non-websocket data.
 extern int DEBUG;
+
+#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
+//#define STARTFUNC do {} while(0)
 
 std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
 std::vector <std::string> split(std::string const &src, int maxcuts = -1, std::string::size_type pos = 0, std::string const &chars = " \t\r\n\v\f");

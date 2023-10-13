@@ -6,7 +6,7 @@ OBJECTS = $(addprefix build/,$(addsuffix .o,${PARTS}))
 
 all: $(addprefix build/,$(addsuffix .elf,${TARGETS}))
 
-FLAGS = -std=c++23 -Wall -Wextra
+FLAGS = -std=c++23 -Wall -Wextra -ggdb3
 
 build/%.o: ../src/%.cc ${HEADERS}
 	mkdir -p build

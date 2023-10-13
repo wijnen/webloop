@@ -13,12 +13,10 @@
 #include <sstream>
 #include <memory>
 #include <iomanip>
+#include "tools.hh"
 // }}}
 
 #define WEBOBJECT_DUMPS_JSON
-
-//#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
-#define STARTFUNC do {} while(0)
 
 class WebNone;
 class WebInt;

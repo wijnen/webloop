@@ -1,10 +1,12 @@
 #include "loop.hh"
+#include "tools.hh"
 #include <cassert>
 
 using namespace std::literals;
 
 int Loop::PollItems::add(IoRecord *item) { // {{{
 	// Add an fd; return index.
+	STARTFUNC;
 	size_t ret;
 	if (!empty_items.empty()) {
 		// There is space at a removed index.
@@ -39,6 +41,7 @@ int Loop::PollItems::add(IoRecord *item) { // {{{
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
+	STARTFUNC;
 	assert(data[index].fd >= 0);
 	if (index == num - 1) {
 		--num;
@@ -64,16 +67,33 @@ void Loop::PollItems::remove(int index) { // {{{
 	empty_items.insert(index);
 } // }}}
 
+std::string Loop::PollItems::print() { // {{{
+	STARTFUNC;
+	std::ostringstream ret;
+	ret << "PollItems num = " << num << "/" << capacity << "(minimum " << min_capacity << "); Items:";
+	for (size_t i = 0; i < (unsigned)capacity; ++i) {
+		ret << "\n\t" << data[i].fd << ": ";
+		if (i < items.size()) {
+			IoRecord &r = *items[i];
+			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << " read:" << (void *)r.read << " write:" << (void *)r.write << " error:" << (void *)r.error << " handle:" << r.handle;
+		}
+		else
+			ret << "X";
+	}
+	return ret.str();
+} // }}}
+
 int Loop::handle_timeouts() { // {{{
+	STARTFUNC;
 	Time current = now();
 	while (!aborting && !timeouts.empty() && timeouts.begin()->time <= current) {
 		TimeoutRecord rec = *timeouts.begin();
 		timeouts.erase(timeouts.begin());
-		bool keep = rec.cb(rec.user_data);
+		bool keep = (ret.object->*rec.cb)();
 		if (keep && rec.interval > Duration()) {
 			while (rec.time <= current)
 				rec.time += rec.interval;
-			add_timeout({rec.time, rec.interval, rec.cb, rec.user_data});
+			add_timeout({rec.time, rec.interval, rec.cb, rec.object});
 		}
 	}
 	if (timeouts.empty())
@@ -82,6 +102,7 @@ int Loop::handle_timeouts() { // {{{
 } // }}}
 
 void Loop::iteration(bool block) { // {{{
+	STARTFUNC;
 	// Do a single iteration of the main loop.
 	// @return None.
 	int t = handle_timeouts();
@@ -95,18 +116,18 @@ void Loop::iteration(bool block) { // {{{
 		if (ev == 0)
 			continue;
 		if (ev & (POLLERR | POLLNVAL)) {
-			if (!items.items[i]->error || !items.items[i]->error(items.items[i]->user_data))
+			if (!items.items[i]->error || !(items.items[i]->object->*(items.items[i]->error))())
 				items.remove(i);
 		}
 		else {
 			if (ev & (POLLIN | POLLPRI)) {
-				if (!items.items[i]->read || !items.items[i]->read(items.items[i]->user_data)) {
+				if (!items.items[i]->read || !(items.items[i]->object->*(items.items[i]->read))()) {
 					items.remove(i);
 					continue;
 				}
 			}
 			if (ev & POLLOUT) {
-				if (!items.items[i]->write || !items.items[i]->write(items.items[i]->user_data))
+				if (!items.items[i]->write || !(items.items[i]->object->*(items.items[i]->write))())
 					items.remove(i);
 			}
 		}
@@ -115,17 +136,20 @@ void Loop::iteration(bool block) { // {{{
 } // }}}
 
 void Loop::run() { // {{{
+	STARTFUNC;
 	// Wait for events and handle them.
 	// @return None.
 	assert(!running);
 	running = true;
 	aborting = false;
 	while (running) {
+		if (DEBUG > 4)
+			log("running, items = " + items.print());
 		iteration(idle.empty());
 		if (!running)
 			continue;
 		for (auto i = idle.begin(); i != idle.end(); ++i) {
-			if (!i->cb(i->user_data))
+			if (!(i->object->*(i->cb))())
 				remove_idle(i);
 			if (!running)
 				break;
@@ -137,6 +161,7 @@ void Loop::run() { // {{{
 // }}}
 
 void Loop::stop(bool force) { // {{{
+	STARTFUNC;
 	// Stop a running loop.
 	// @return None.
 	assert(running);

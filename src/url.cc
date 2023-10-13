@@ -1,3 +1,5 @@
+#include <sstream>
+#include <iomanip>
 #include "url.hh"
 #include "tools.hh"
 
@@ -49,14 +51,14 @@ URL::URL(std::string const &url) : src(url) {
 	} // }}}
 	// Store path for explicit unix domain sockets.
 	if (scheme == "unix://")
-		unix = host + path;	// TODO allow escaped characters.
+		unix = decode(host + path);	// this allows, but does not require, for slashes to be encoded. The purpose is to be able to encode the other special characters.
 	if (url[p] == ';') { // parameters. {{{
 		q = url.find_first_of("?#", ++p);
 		if (q == std::string::npos) {
-			parameters = url.substr(p);
+			parameters = decode(url.substr(p));
 			return;
 		}
-		parameters = url.substr(p, q - p);
+		parameters = decode(url.substr(p, q - p));
 		p = q;
 	} // }}}
 	if (url[p] == '?') { // query. {{{
@@ -68,7 +70,7 @@ URL::URL(std::string const &url) : src(url) {
 		p = q;
 	} // }}}
 	if (p != std::string::npos) { // fragment. {{{
-		fragment = url.substr(p);
+		fragment = decode(url.substr(p));
 	} // }}}
 	// Parse query string. {{{
 	// Split into parts.
@@ -77,11 +79,13 @@ URL::URL(std::string const &url) : src(url) {
 	for (auto kv: m) {
 		std::string key, value;
 		p = kv.find('=');
-		if (p == std::string::npos)
-			key = kv;
+		if (p == std::string::npos) {
+			key = decode(kv);
+			value.clear();
+		}
 		else {
-			key = kv.substr(0, p);
-			value = kv.substr(p + 1);
+			key = decode(kv.substr(0, p));
+			value = decode(kv.substr(p + 1));
 		}
 		// TODO: decode key and value.
 		if (!multiquery.contains(key)) {
@@ -97,7 +101,41 @@ std::string URL::build_request() { // {{{
 	std::string ret = path;
 	if (ret.empty() || ret[0] != '/')
 		ret = "/" + ret;
-	return ret + parameters + rawquery + fragment;
+	return ret + encode(parameters, 1) + rawquery; // + encode(fragment, 1); The fragment probably should not be sent to the server.
+} // }}}
+
+std::string URL::encode(std::string const &src, std::string::size_type pos) { // {{{
+	// Replace URL parts by escape codes.
+	if (src.size() <= pos)
+		return src;
+	std::string ret = src.substr(0, pos);
+	for (auto i = pos; i < src.size(); ++i) {
+		auto c = src[i];
+		if (c <= 32 || c >= 127 || c == ':' || c == '/' || c == ';' || c == '?' || c == '#' || c == '&' || c == '%')
+			ret += (std::ostringstream() << "%" << std::hex << std::setfill('0') << std::setw(2) << (c & 0xff)).str();
+		else
+			ret += c;
+	}
+	return ret;
+} // }}}
+
+std::string URL::decode(std::string const &src) { // {{{
+	std::string ret;
+	std::string::size_type pos = 0;
+	while (pos < src.size()) {
+		auto q = src.find('%', pos);
+		if (q == std::string::npos) {
+			ret += src.substr(pos);
+			return ret;
+		}
+		if (q + 3 > src.size()) {
+			log("Warning: decode found incomplete escape");
+		}
+		ret += src.substr(pos, q - pos);
+		ret += char(std::stoi(src.substr(q + 1, 2), nullptr, 16) & 0xff);
+		pos = q + 3;
+	}
+	return ret;
 } // }}}
 
 // vim: set foldmethod=marker :

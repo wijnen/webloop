@@ -59,16 +59,21 @@ sockets.  Connection targets can be specified in several ways.
 // }}} */
 
 // Network sockets. {{{
-bool Socket::read_impl(void *self_ptr) { // {{{
-	Socket *self = reinterpret_cast <Socket *>(self_ptr);
-	self->buffer += self->recv();
-	if (!self->read_cb)
+template <class UserType>
+bool Socket <UserType>::read_impl() { // {{{
+	STARTFUNC;
+	buffer += self->recv();
+	if (DEBUG > 3)
+		log("new data; buffer:" + WebString(self->buffer).dump());
+	if (!read_cb)
 		return false;
-	self->read_cb(self->buffer, self->user_data);
+	(user->*read_cb)(self->buffer);
 	return true;
 } // }}}
 
-bool Socket::handle_read_line_data(std::string &&data) { // {{{
+template <class UserType>
+bool Socket <UserType>::handle_read_line_data(std::string &&data) { // {{{
+	STARTFUNC;
 	buffer += data;
 	if (!read_lines_cb)
 		return false;
@@ -85,12 +90,15 @@ bool Socket::handle_read_line_data(std::string &&data) { // {{{
 	return true;
 } // }}}
 
-bool Socket::read_lines_impl(void *self_ptr) { // {{{
+template <class UserType>
+bool Socket <UserType>::read_lines_impl(void *self_ptr) { // {{{
+	STARTFUNC;
 	Socket *self = reinterpret_cast <Socket *>(self_ptr);
 	return self->handle_read_line_data(self->recv());
 } // }}}
 
-Socket::Socket(std::string const &address, void *user_data) // {{{
+template <class UserType>
+Socket <UserType>::Socket(std::string const &address, void *user_data) // {{{
 	:
 		fd(-1),
 		mymaxsize(4096),
@@ -103,6 +111,7 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 		user_data(user_data),
 		url(address)
 {
+	STARTFUNC;
 	/* Create a connection.
 	@param address: connection target.  This is a unix domain
 	socket if there is a / in it.  If it is not a unix domain
@@ -162,7 +171,8 @@ Socket::Socket(std::string const &address, void *user_data) // {{{
 	}
 } // }}}
 
-Socket::Socket(Socket &&other) : // {{{
+template <class UserType>
+Socket <UserType>::Socket(Socket &&other) : // {{{
 		fd(other.fd),
 		mymaxsize(other.mymaxsize),
 		current_loop(other.current_loop),
@@ -174,6 +184,7 @@ Socket::Socket(Socket &&other) : // {{{
 		disconnect_cb(other.disconnect_cb),
 		user_data(other.user_data)
 {
+	STARTFUNC;
 	other.fd = -1;
 	*server_data = this;
 	if (read_item.user_data == &other) {
@@ -182,7 +193,9 @@ Socket::Socket(Socket &&other) : // {{{
 	}
 } // }}}
 
-Socket &Socket::operator=(Socket &&other) { // {{{
+template <class UserType>
+Socket &Socket <UserType>::operator=(Socket &&other) { // {{{
+	STARTFUNC;
 	fd = other.fd;
 	other.fd = -1;
 	mymaxsize = other.mymaxsize;
@@ -204,7 +217,9 @@ Socket &Socket::operator=(Socket &&other) { // {{{
 	return *this;
 } // }}}
 
-std::string Socket::close() { // {{{
+template <class UserType>
+std::string Socket <UserType>::close() { // {{{
+	STARTFUNC;
 	//'Close the network connection.
 	// @return The data that was remaining in the line buffer, if any.
 	if (fd < 0)
@@ -219,7 +234,9 @@ std::string Socket::close() { // {{{
 	return pending;
 } // }}}
 
-void Socket::send(std::string const &data) { // {{{
+template <class UserType>
+void Socket <UserType>::send(std::string const &data) { // {{{
+	STARTFUNC;
 	/* Send data over the network.
 	Send data over the network.  Block until all data is in the buffer.
 	@param data: data to write.  This should be of type bytes.
@@ -227,7 +244,8 @@ void Socket::send(std::string const &data) { // {{{
 	*/
 	if (fd < 0)
 		return;
-	//log("Sending: " + WebString(data).dump());
+	if (DEBUG > 3)
+		log("Sending: " + WebString(data).dump());
 	size_t p = 0;
 	while (p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);
@@ -239,7 +257,9 @@ void Socket::send(std::string const &data) { // {{{
 	}
 } // }}}
 
-void Socket::sendline(std::string const &data) { // {{{
+template <class UserType>
+void Socket <UserType>::sendline(std::string const &data) { // {{{
+	STARTFUNC;
 	// Send a line of text.
 	// Identical to send(), but data is a str and a newline is added.
 	// @param data: line to send.  A newline is added.  This should be
@@ -247,7 +267,9 @@ void Socket::sendline(std::string const &data) { // {{{
 	send(data + "\n");
 } // }}}
 
-std::string Socket::recv() { // {{{
+template <class UserType>
+std::string Socket <UserType>::recv() { // {{{
+	STARTFUNC;
 	/* Read data from the network.
 	Data is read from the network.  If the socket is not set to
 	non-blocking, this call will block if there is no data.  It
@@ -281,7 +303,9 @@ std::string Socket::recv() { // {{{
 	return std::string(buffer, num);
 } // }}}
 
-std::string Socket::rawread(Loop::Cb cb, Loop::Cb error, Loop *loop, void *udata) { // {{{
+template <class UserType>
+std::string Socket <UserType>::rawread(Loop::Cb cb, Loop::Cb error, Loop *loop, void *udata) { // {{{
+	STARTFUNC;
 	/* Register function to be called when data is ready for reading.
 	The function will be called when data is ready.  The callback
 	must read the function or call unread(), or it will be called
@@ -299,7 +323,9 @@ std::string Socket::rawread(Loop::Cb cb, Loop::Cb error, Loop *loop, void *udata
 	return ret;
 } // }}}
 
-void Socket::read(ReadCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
+template <class UserType>
+void Socket <UserType>::read(ReadCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
+	STARTFUNC;
 	/* Register function to be called when data is received.
 	When data is available, read it and call this function.  The
 	data that was remaining in the line buffer, if any, is sent to
@@ -311,6 +337,8 @@ void Socket::read(ReadCb callback, Loop::Cb error, Loop *loop, size_t maxsize) {
 	@param maxsize: buffer size that is used for the recv call.
 	@return None.
 	*/
+	if (DEBUG > 4)
+		log("fd:" + std::to_string(fd));
 	if (fd < 0)
 		return;
 	current_loop = Loop::get(loop);
@@ -322,7 +350,9 @@ void Socket::read(ReadCb callback, Loop::Cb error, Loop *loop, size_t maxsize) {
 		read_cb(first, user_data);
 } // }}}
 
-void Socket::read_lines(ReadLinesCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
+template <class UserType>
+void Socket <UserType>::read_lines(ReadLinesCb callback, Loop::Cb error, Loop *loop, size_t maxsize) { // {{{
+	STARTFUNC;
 	/* Buffer incoming data until a line is received, then call a function.
 	When a newline is received, all data up to that point is
 	decoded as an utf-8 string and passed to the callback.
@@ -346,7 +376,9 @@ void Socket::read_lines(ReadLinesCb callback, Loop::Cb error, Loop *loop, size_t
 		handle_read_line_data(std::move(first));
 } // }}}
 
-std::string Socket::unread() { // {{{
+template <class UserType>
+std::string Socket <UserType>::unread() { // {{{
+	STARTFUNC;
 	/* Cancel a read() or rawread() callback.
 	Cancel any read callback.
 	@return Bytes left in the line buffer, if any.  The line buffer
@@ -363,12 +395,16 @@ std::string Socket::unread() { // {{{
 // }}}
 
 // Network server. {{{
-void Server::remote_disconnect(std::list <Socket *>::iterator socket) { // {{{
-	(*socket)->server = nullptr;
+template <class UserType>
+void Server <UserType>::remote_disconnect(std::list <Socket <UserType> >::iterator socket) { // {{{
+	STARTFUNC;
+	socket->server = nullptr;
 	remotes.erase(socket);
 } // }}}
 
-void Server::open_socket(std::string const &service, int backlog) { // {{{
+template <class UserType>
+void Server <UserType>::open_socket(std::string const &service, int backlog) { // {{{
+	STARTFUNC;
 	// Open the listening socket(s).
 	auto p = service.find("/");
 	if (p != std::string::npos) {
@@ -405,6 +441,8 @@ void Server::open_socket(std::string const &service, int backlog) { // {{{
 			std::cerr << "unable to create socket: " << strerror(errno) << std::endl;
 			continue;
 		}
+		int t = 1;
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t));
 		if (bind(fd, rp->ai_addr, rp->ai_addrlen) < 0) {
 			if (listeners.empty() || errno != EADDRINUSE)
 				std::cerr << "unable to bind: " << strerror(errno) << std::endl;
@@ -425,7 +463,9 @@ void Server::open_socket(std::string const &service, int backlog) { // {{{
 	}
 } // }}}
 
-bool Server::accept_remote(void *self_ptr) { // {{{
+template <class UserType>
+bool Server <UserType>::accept_remote(void *self_ptr) { // {{{
+	STARTFUNC;
 	Listener *listener = reinterpret_cast <Listener *>(self_ptr);
 	Server *self = listener->server;
 	struct sockaddr_un addr;	// Use largest struct; cast down for others.
@@ -482,7 +522,8 @@ bool Server::accept_remote(void *self_ptr) { // {{{
 	return true;
 } // }}}
 
-Server::Server(std::string const &service, ConnectedCb cb, Loop::Cb error, void *user_data, Loop *loop, int backlog) : // {{{
+template <class UserType>
+Server <UserType>::Server(std::string const &service, ConnectedCb cb, Loop::Cb error, void *user_data, Loop *loop, int backlog) : // {{{
 		listenloop(Loop::get(loop)),
 		listeners(),
 		backlog(backlog),
@@ -490,6 +531,7 @@ Server::Server(std::string const &service, ConnectedCb cb, Loop::Cb error, void 
 		connected_cb(cb),
 		remotes()
 {
+	STARTFUNC;
 	open_socket(service, backlog);
 	for (auto i = listeners.begin(); i != listeners.end(); ++i) {
 		i->server = this;
@@ -497,7 +539,9 @@ Server::Server(std::string const &service, ConnectedCb cb, Loop::Cb error, void 
 	}
 } // }}}
 
-void Server::close() { // {{{
+template <class UserType>
+void Server <UserType>::close() { // {{{
+	STARTFUNC;
 	assert(!listeners.empty());
 	while (!remotes.empty())
 		remotes.back()->close();

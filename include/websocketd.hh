@@ -100,12 +100,13 @@ locally by using call().
 #include "loop.hh"
 // }}}
 
+template <class UserType>
 class Websocket { // {{{
 public:
-	typedef void (*Receiver)(std::string const &data, void *user_data);
+	typedef void (UserType::*Receiver)(std::string const &data);
 private:
 	// Main class implementing the websocket protocol.
-	Socket socket;
+	Socket <UserType> socket;
 	std::string buffer;
 	std::string fragments;
 	Loop::TimeoutHandle keepalive_handle;
@@ -114,29 +115,38 @@ private:
 	uint8_t current_opcode;
 	Receiver receiver;
 	bool send_mask;		// whether masks are used to sent data (true for client, false for server).
-	void *user_data;				// passed through to callback functions.
+	UserType *user;				// callback functions are called on this object.
 public:
-	struct Settings {
+	// Settings for connecting (ignored for accepted websockets).
+	struct ConnectSettings {
 		std::string method;				// default: GET
 		std::string user;				// login name; if both this and password are empty: don't send them.
 		std::string password;				// login password
+		std::map <std::string, std::string> sent_headers;	// extra headers, sent to server.
+	};
+	// Settings used for all websockets (both connected and accepted).
+	struct RunSettings {
 		Loop *loop;					// Main loop to use; usually nullptr, so the default is used.
 		Loop::Duration keepalive;			// keepalive timer.
-		std::map <std::string, std::string> headers;	// extra headers.
 	};
-	Settings settings;
-	std::map <std::string, std::string> headers;
-	static void disconnect(void *self_ptr);
-	Websocket(std::string const &address, Receiver receiver, Settings const &settings, void *user_data);
-	Websocket(int socket_fd, Receiver receiver, Settings const &settings, void *user_data);
-	static bool keepalive(void *self_ptr);
-	static void read(std::string &data, void *self_ptr);
+	ConnectSettings connect_settings;
+	RunSettings run_settings;
+	std::map <std::string, std::string> received_headers;	// Headers that are received from server. (Only for accepted websockets.)
+	void disconnect();
+	Websocket() {}
+	Websocket(std::string const &address, Receiver receiver, ConnectSettings const &connect_settings, RunSettings const &run_settings, UserType *user);
+	Websocket(int socket_fd, Receiver receiver, RunSettings const &run_settings, UserType *user);
+	Websocket(Socket <UserType> &&socket, Receiver receiver = nullptr, RunSettings const &run_settings = {}, UserType *user = nullptr);
+	// TODO: move constructor and assignment.
+	bool keepalive();
+	void read(std::string &data);
 	void send(std::string const &data, int opcode = 1); // Send a WebSocket frame.
 	bool ping(std::string const &data = std::string()); // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong.
 	void close(); // Close a WebSocket.  (Use socket.close for other connections.)
 }; // }}}
 
-class RPC : public Websocket { // {{{
+template <class UserType>
+class RPC : public Websocket <UserType> { // {{{
 	/* Remote Procedure Call over Websocket.
 	This class manages a communication object, and on the other end of the
 	connection a similar object should exist.  When calling a member of
@@ -152,52 +162,53 @@ class RPC : public Websocket { // {{{
 	the remote end attempts will fail.
 	*/
 public:
-	typedef void (*Reply)(std::shared_ptr <WebObject>, void *self_ptr);
+	typedef void (UserType::*BgReply)(std::shared_ptr <WebObject>);
 	typedef std::shared_ptr <WebVector> Args;
 	typedef std::shared_ptr <WebMap> KwArgs;
-	typedef coroutine (*Published)(Args args, KwArgs kwargs, void *user_data);
+	typedef coroutine (UserType::*Published)(Args args, KwArgs kwargs);
 	struct Call {
 		int code;
 		std::string target;
 		Args args;
 		KwArgs kwargs;
-		void *user_data;
+		UserType *user;
 	};
-	typedef void (*ErrorCb)(std::string const &message, void *user_data);
-	struct ReplyData {
-		Reply reply;
-		void *user_data;
+	typedef void (UserType::*ErrorCb)(std::string const &message);
+	struct BgReplyData {
+		UserType *caller;
+		BgReply reply;
 	};
 private:
 	ErrorCb error;
-	static int reply_index;
-	static std::map <int, ReplyData> expecting_reply;
-	static Loop::IdleHandle activation_handle;
-	static std::list <RPC *> activation_queue;
+	int reply_index;
+	std::map <int, BgReplyData> expecting_reply_bg;
+	std::map <int, coroutine::handle_type> expecting_reply_fg;
+	Loop::IdleHandle activation_handle;
+	std::list <RPC *> activation_queue;
 	std::list <Call> delayed_calls;
 	bool activated;
 	std::map <std::string, Published> published;
 	std::set <std::map <std::string, std::shared_ptr <RPC> > > groups;
-	void *user_data;
-	static int get_index();
-	static bool activate_all(void *self_ptr);
+	UserType *user;
+	int get_index();
+	bool activate_all();
 	void activate();
-	static void recv(std::string const &frame, void *self_ptr);
+	void recv(std::string const &frame);
 	void send(std::string const &code, std::shared_ptr <WebObject> object);
 	struct IdSelf { // {{{
 		int id;
 		RPC *self;
 	}; // }}}
-	static void call_return(std::shared_ptr <WebObject> ret, void *idselfptr);
+	void call_return(std::shared_ptr <WebObject> ret, void *idselfptr);
 	void called(int id, std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
-	static void fgcb(std::shared_ptr <WebObject> ret, void *user_data);
+	void fgcb(std::shared_ptr <WebObject> ret);
 public:
-	RPC(std::string const &address, std::map <std::string, Published> const &published = {}, ErrorCb error = {}, void *user_data = nullptr, Websocket::Settings const &settings = {.method = "GET", .user = {}, .password = {}, .loop = nullptr, .keepalive = 50s, .headers = {}});
-	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, Reply cb = nullptr, void *override_user_data = nullptr);
+	RPC(std::string const &address, std::map <std::string, Published> const &published = {}, ErrorCb error = {}, UserType *user = nullptr, Websocket <UserType>::ConnectSettings const &connect_settings = {.method = "GET", .user = {}, .password = {}, .sent_headers = {}}, Websocket <UserType>::RunSettings const &run_settings = {.loop = nullptr, .keepalive = 50s});
+	void bgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs, BgReply reply = nullptr);
 	coroutine fgcall(std::string const &target, std::shared_ptr <WebVector> args, std::shared_ptr <WebMap> kwargs);
 }; // }}}
 
-template <class websocket>
+template <class UserType>
 class Httpd { // {{{
 	/* HTTP server.
 	This object implements an HTTP server.  It supports GET and
@@ -209,33 +220,32 @@ private:
 	friend class Connection;
 	std::vector <std::string> httpdirs;		// Directories where static web pages are searched.
 	std::vector <std::string> proxy;		// Proxy prefixes which are ignored when received.
-	typedef RPC::ErrorCb ErrorCb;
+	typedef RPC <UserType>::ErrorCb ErrorCb;
 	ErrorCb error;					// Error callback.
-	void *user_data;				// User data to send with callbacks.
+	UserType *user;					// User data to send with callbacks.
 	std::map <std::string, std::string> exts;	// Handled extensions; value is mime type.
 	Loop *loop;					// Main loop for registering read events.
-	Server server;					// Network server which provides the interface.
-	std::list <Connection> connections;		// Active non-websocket connections.
-	std::list <websocket> websockets;		// Active websocket connections.
-	static void new_connection(Socket &&remote, void *self_ptr);
-	static bool server_error(void *self_ptr) { // {{{
-		Httpd *self = reinterpret_cast <Httpd *>(self_ptr);
-		(void)&self;
-		// TODO
-		return false;
-	} // }}}
+	Server <Connection> server;			// Network server which provides the interface.
+	std::list <Connection> connections;		// Active connections, including non-websockets.
+	void new_connection(Socket <UserType> &&remote);
 	virtual char const *authentication(Connection &connection) { (void)&connection; return nullptr; }	// Override to require authentication.
 	virtual bool valid_credentials(Connection &connection) { (void)&connection; return true; }	// Override to check credentials.
 	virtual bool page(Connection &connection) { (void)&connection; return false; }	// Override and return true to provide dynamic pages.
+	void server_error(std::string const &message) { // {{{
+		log("Error received by server: " + message);
+		if (error)
+			(user->*error)("Error received by server: " + message);
+	} // }}}
 public:
-	Httpd(std::string const &service, std::vector <std::string> const &httpdirs = {}, std::vector <std::string> const &proxy = {}, ErrorCb error = nullptr, void *user_data = nullptr, Loop *loop = nullptr, int backlog = 5) : // {{{
+	Httpd(std::string const &service, std::vector <std::string> const &httpdirs = {}, std::vector <std::string> const &proxy = {}, ErrorCb error = nullptr, Loop *loop = nullptr, int backlog = 5) : // {{{
 			httpdirs(httpdirs),
 			proxy(proxy),
 			error(error),
-			user_data(user_data),
+			user(nullptr),
 			exts(),
 			loop(Loop::get(loop)),
-			server(service, new_connection, server_error, this, loop, backlog)
+			server(service, this, &Httpd <UserType>::server_error, loop, backlog),
+			connections{}
 	{
 		/* Create a webserver.
 		Additional arguments are passed to the network.Server.
@@ -247,7 +257,7 @@ public:
 			should be ignored if requested.
 		*/
 
-		// Automatically add all extensions for which a mime type exists.
+		// Automatically add all extensions for which a mime type exists. {{{
 		std::ifstream mimetypes("/etc/mime.types");
 		if (mimetypes.is_open()) {
 			std::set <std::string> duplicate;
@@ -295,7 +305,7 @@ public:
 				{"svg", "image/svg+xml"},
 				{"txt", "text/plain;charset=utf-8"}
 			};
-		}
+		} // }}}
 	} // }}}
 	/*def page(self, connection, path = None):	// A non-WebSocket page was requested.  Use connection.address, connection.method, connection.query, connection.headers and connection.body (which should be empty) to find out more.  {{{
 		/ * Serve a non-websocket page.
@@ -358,32 +368,33 @@ public:
 	// }}} */
 }; // }}}
 
-template <class websocket>
-class Httpd <websocket>::Connection { // {{{
+template <class UserType>
+class Httpd <UserType>::Connection { // {{{
 	/* Connection object for an HTTP server.
 	This object implements the internals of an HTTP server.  It
 	supports GET and POST, and of course websockets.  Don't
 	construct these objects directly.
 	*/
-	static std::map <int, char const *> http_response;
-	Httpd <websocket> *httpd;
-	Socket socket;
+	friend class Httpd <UserType>;
+	static std::map <int, char const *> http_response;	// TODO: this is duplicated if the template is used multiple times; it shouldn't be.
+	Httpd <UserType> *httpd;
+	Socket <UserType> socket;
 public:
-	std::map <std::string, std::string> headers;
+	std::map <std::string, std::string> received_headers;
 	std::string method;
 	URL url;
 	std::string http_version;
 	std::string user;
 	std::string password;
 	std::string prefix;
-	static std::string ignore_disconnect(std::string const &pending, void *user_data) { (void)&pending; (void)&user_data; return {}; }
-	static void read_header(std::string &buffer, void *self_ptr) { // {{{
-		Connection *self = reinterpret_cast <Connection *>(self_ptr);
+	std::string ignore_disconnect(std::string const &pending) { (void)&pending; return {}; }
+	void read_header(std::string &buffer) { // {{{
+		log("reading header");
 		std::string::size_type p = 0;
 		std::list <std::string> lines;
 		// Read header lines. {{{
 		while (true) {
-			auto q = buffer.find('\n');
+			auto q = buffer.find('\n', p);
 			if (q == std::string::npos) {
 				// Header is not complete yet.
 				return;
@@ -395,12 +406,15 @@ public:
 				continue;
 			}
 			if (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
-				if (lines.empty())
+				if (lines.empty()) {
 					log("Error: http request starts with continuation");
+					socket.close();
+					return;
+				}
 				else if (lines.size() == 1) {
 					// A continuation on the request line MUST be rejected (or ignored) according to HTTP.
 					log("Error: http request contains a continuation");
-					self->socket.close();
+					socket.close();
 					return;
 				}
 				else
@@ -408,11 +422,9 @@ public:
 				continue;
 			}
 			line = strip(line);
-			if (!line.empty()) {
-				lines.push_back(line);
-				continue;
-			}
-			break;
+			if (line.empty())
+				break;
+			lines.push_back(line);
 		}
 		// }}}
 		// Header complete; parse it.
@@ -421,19 +433,19 @@ public:
 		auto request = split(lines.front(), 2);
 		if (request.size() != 3 || request[1][0] != '/') {
 			log("Warning: ignoring invalid request " + lines.front());
-			self->socket.close();
+			socket.close();
 			return;
 		}
-		self->method = upper(request[0]);
+		method = upper(request[0]);
 		std::string path = request[1];
-		self->http_version = request[2];
-		for (auto prefix: self->httpd->proxy) {
-			if (startswith(path, "/" + prefix + "/") || path == "/" + prefix) {
-				self->prefix = "/" + prefix;
+		http_version = request[2];
+		for (auto current_prefix: httpd->proxy) {
+			if (startswith(path, "/" + current_prefix + "/") || path == "/" + current_prefix) {
+				prefix = "/" + current_prefix;
 				break;
 			}
 		}
-		std::string noprefix_path = path.substr(self->prefix.size());
+		std::string noprefix_path = path.substr(prefix.size());
 		if (noprefix_path.empty() || noprefix_path[0] != '/')
 			noprefix_path = "/" + noprefix_path;
 		// }}}
@@ -446,48 +458,44 @@ public:
 			}
 			auto key = lower(strip(line->substr(0, p)));
 			auto value = strip(line->substr(p + 1));
-			self->headers[key] = value;
+			received_headers[key] = value;
 		}
 		// }}}
-		if (!self->headers.contains("host")) {
+		if (!received_headers.contains("host")) {
 			log("Error in request: no Host header");
-			self->socket.close();
+			socket.close();
 			return;
 		}
-		std::string host = self->headers["host"];
-		self->url = URL(host + noprefix_path);
+		std::string host = received_headers["host"];
+		url = URL(host + noprefix_path);
 		// Check if authorization is required and provided. {{{
-		auto message = self->httpd->authentication(*self);
+		auto message = httpd->authentication(*this);
 		if (message) {
 			// Authentication required; check if it was present.
-			auto i = self->headers.find("authorization");
-			if (i == self->headers.end()) {
+			auto i = received_headers.find("authorization");
+			if (i == received_headers.end()) {
 				// No authorization requested; reply 401.
-				// TODO self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
-				self->socket.close();
+				reply(401, {}, {}, {{"WWW-Authenticate", std::string("Basic realm=\"") + message + "\""}}, true);
 				return;
 			}
 			// Authorization requested; check it.
 			auto data = split(i->second, 1);
 			if (data.size() != 2 || data[0] != "basic") {
 				// Invalid authorization.
-				// TODO self.server.reply(self, 400, close = True)
-				self->socket.close();
+				reply(400, {}, {}, {}, true);
 				return;
 			}
 			auto pwdata = data[1]; // TODO:b64decode(data[1]);
 			auto p = pwdata.find(':');
 			if (p == std::string::npos) {
 				// Invalid authorization.
-				// TODO self.server.reply(self, 400, close = True)
-				self->socket.close();
+				reply(400, {}, {}, {}, true);
 				return;
 			}
-			self->user = pwdata.substr(0, p);
-			self->password = pwdata.substr(p + 1);
-			if (!self->httpd->valid_credentials(*self)) {
-				// TODO self.server.reply(self, 401, headers = {'WWW-Authenticate': 'Basic realm="%s"' % msg.replace('\n', ' ').replace('\r', ' ').replace('"', "'")}, close = True)
-				self->socket.close();
+			user = pwdata.substr(0, p);
+			password = pwdata.substr(p + 1);
+			if (!httpd->valid_credentials(*this)) {
+				reply(401, {}, {}, {{"WWW-Authenticate", std::string("Basic realm=\"") + message + "\""}}, true);
 				return;
 			}
 		}
@@ -495,7 +503,7 @@ public:
 		// }}}
 
 		// Parse request: handle POST. TODO {{{
-		if (self->method == "POST") {
+		if (method == "POST") {
 			// TODO
 			/*if self.method.upper() == 'POST':
 				if 'content-type' not in self.headers or self.headers['content-type'].lower().split(';')[0].strip() != 'multipart/form-data':
@@ -523,53 +531,51 @@ public:
 		// - Serve a static page.
 		// - Serve a dynamic page.
 		// - Create a websocket.
-		auto c = self->headers.find("connection");
-		auto u = self->headers.find("upgrade");
-		if (c != self->headers.end() && u != self->headers.end() && lower(c->second) == "upgrade" && lower(u->second) == "websocket") {
+		auto c = received_headers.find("connection");
+		auto u = received_headers.find("upgrade");
+		if (c != received_headers.end() && u != received_headers.end() && lower(c->second) == "upgrade" && lower(u->second) == "websocket") {
 			// This is a websocket.
-			auto k = self->headers.find("sec-websocket-key");
-			if (self->method != "GET" || k == self->headers.end()) {
-				// self.server.reply(self, 400, close = True)
-				self->socket.close();
+			auto k = received_headers.find("sec-websocket-key");
+			if (method != "GET" || k == received_headers.end()) {
+				reply(400, {}, {}, {}, true);
 				return;
 			}
 			// TODO.
 			// newkey = base64.b64encode(hashlib.sha1(self.headers['sec-websocket-key'].strip().encode('utf-8') + b'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest()).decode('utf-8')
 			// headers = {'Sec-WebSocket-Accept': newkey, 'Connection': 'Upgrade', 'Upgrade': 'WebSocket'}
 			// self.server.reply(self, 101, None, None, headers, close = False)
-			self->httpd->websockets.emplace_back(*self);
+			reply(101, {}, {}, {}, false);
+			httpd->cb(std::move(socket), this);
 			return;
 		}
 		// Attempt to serve a dynamic page.
-		if (!self->httpd->page(*self)) {
+		if (!httpd->page(*this)) {
 			// This was not a dynamic page; attempt to serve a static page.
 			// TODO.
-			self->socket.close();
+			socket.close();
 			return;
 		}
 	} // }}}
-	static bool connection_error(void *self_ptr) { // {{{
-		Connection *self = reinterpret_cast <Connection *>(self_ptr);
+	bool connection_error() { // {{{
 		// TODO
-		(void)&self;
 		return false;
 	} // }}}
-	Connection(Socket &&socket, Httpd <websocket> *server) : // {{{
+	Connection(Socket <UserType> &&src, Httpd *server) : // {{{
 			httpd(server),
-			socket(std::move(socket)),
-			headers{},
+			socket(std::move(src)),
+			received_headers{},
 			method{},
 			url{},
 			http_version{},
 			prefix{}
 	{
 		socket.disconnect_cb = ignore_disconnect;
-		socket.user_data = this;
+		socket.user = this;
 		socket.read(read_header, connection_error, httpd->loop);
 		if (DEBUG > 2)
 			log((std::ostringstream() << "new connection from " << socket.url.host << ":" << socket.url.service).str());
 	} // }}}
-	void reply(int code, std::string const &message = {}, std::string const &content_type = {}, std::map <std::string, std::string> headers = {}, bool close = false) { // Send HTTP status code and headers, and optionally a message.  {{{
+	void reply(int code, std::string const &message = {}, std::string const &content_type = {}, std::map <std::string, std::string> const &sent_headers = {}, bool close = false) { // Send HTTP status code and headers, and optionally a message.  {{{
 		/* Reply to a request for a document.
 		There are three ways to call this function:
 		* With a message and content_type.  This will serve the data as a normal page.
@@ -580,24 +586,31 @@ public:
 		char const *response = http_response[code];
 		//log('Debug: sending reply %d %s for %s\n' % (code, httpcodes[code], connection.address.path))
 		socket.send((std::ostringstream() << "HTTP/1.1 " << code << " " << response << "\n").str());
+		std::string the_content_type;
+		std::string the_message;
 		if (message.empty() && code != 101) {
 			assert(content_type.empty());
-			content_type = "text/html;charset=utf-8";
-			message = (std::ostringstream() << "<!DOCTYPE html><html><head><meta charset='utf-8'/><title>" << code << ": " << response << "</title></head><body><h1>" << code << ": " << response << "</h1></body></html>").str();
+			the_content_type = "text/html;charset=utf-8";
+			the_message = (std::ostringstream() << "<!DOCTYPE html><html><head><meta charset='utf-8'/><title>" << code << ": " << response << "</title></head><body><h1>" << code << ": " << response << "</h1></body></html>").str();
 		}
-		if (close && !headers.contains("Connection"))
-			headers["Connection"] = "close";
-		if (!content_type.empty()) {
-			headers["Content-Type"] = content_type;
-			headers["Content-Length"] = (std::ostringstream() << message.size()).str();
+		else {
+			the_content_type = content_type;
+			the_message = message;
+		}
+		if (close && !sent_headers.contains("Connection")) {
+			socket.send("Connection:close\r\n");
+		}
+		if (!the_content_type.empty()) {
+			socket.send("Content-Type:" + the_content_type + "\r\n");
+			socket.send("Content-Length:" + (std::ostringstream() << the_message.size()).str() + "\r\n");
 		}
 		else {
 			assert(code == 101);
-			assert(message.empty());
+			assert(the_message.empty());
 		}
-		for (auto h: headers)
+		for (auto h: sent_headers)
 			socket.send(h.first + ":" + h.second + "\r\n");
-		socket.send("\r\n" + message);
+		socket.send("\r\n" + the_message);
 		if (close)
 			socket.close();
 	} // }}}
@@ -788,12 +801,6 @@ public:
 	# }}}
 		  */
 }; // }}}
-
-template <class websocket>
-void Httpd <websocket>::new_connection(Socket &&remote, void *self_ptr) { // {{{
-	auto self = reinterpret_cast <Httpd <websocket> *>(self_ptr);
-	self->connections.emplace_back(std::move(remote), self);
-} // }}}
 
 /*
 class RPChttpd(Httpd): # {{{

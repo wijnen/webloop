@@ -1,4 +1,5 @@
-// vim: set fileencoding=utf-8 foldmethod=marker :
+#ifndef _NETWORK_HH
+#define _NETWORK_HH
 
 /* {{{ Copyright 2013-2023 Bas Wijnen <wijnen@debian.org>
 // This program is free software: you can redistribute it and/or modify
@@ -63,11 +64,13 @@ using namespace std::literals;
 // - Socket: used for connection; symmetric
 // }}} */
 
-class Server;
+template <class UserType> class Server;
 
+template <class UserType>
 class Socket { // {{{
-	typedef void (*ReadCb)(std::string &buffer, void *user_data);
-	typedef void (*ReadLinesCb)(std::string &&buffer, void *user_data);
+	friend class Server <UserType>;
+	typedef void (UserType::*ReadCb)(std::string &buffer);
+	typedef void (UserType::*ReadLinesCb)(std::string &&buffer);
 	// Connection object.
 	int fd;
 	size_t mymaxsize;	// For read operations.
@@ -76,23 +79,22 @@ class Socket { // {{{
 	ReadCb read_cb;
 	ReadLinesCb read_lines_cb;
 	std::string buffer;
-	Server *server;
-	std::list <Socket *>::iterator server_data;
-	friend class Server;
+	Server <UserType> *server;
+	std::list <UserType>::iterator server_data;
 
-	static bool read_impl(void *self_ptr);
-	static bool read_lines_impl(void *self_ptr);
+	bool read_impl();
+	bool read_lines_impl();
 	bool handle_read_line_data(std::string &&data);
 public:
 	// Callback when socket is disconnected.
-	std::string (*disconnect_cb)(std::string const &pending, void *user_data);
-	// User data, which is passed to callbacks.
-	void *user_data;
+	std::string (UserType::*disconnect_cb)(std::string const &pending);
+	// User object, on which callbacks are called.
+	UserType *user;
 	// Read only address components; these are filled from address in the constructor.
 	URL url;
 
-	Socket(std::string const &address, void *user_data = nullptr);
-	Socket(int fd = -1, void *user_data = nullptr)	 // Use an fd as a "socket", so it can use the functionality of this class. {{{
+	Socket(std::string const &address, UserType *user = nullptr);
+	Socket(int fd = -1, UserType *user = nullptr)	 // Use an fd as a "socket", so it can use the functionality of this class. {{{
 		:
 			fd(fd),
 			mymaxsize(0),
@@ -102,10 +104,10 @@ public:
 			server(nullptr),
 			server_data(),
 			disconnect_cb(nullptr),
-			user_data(user_data)
+			user(user)
 			{} // }}}
-	Socket(Socket &&other);
-	Socket &operator=(Socket &&other);
+	Socket(Socket <UserType> &&other);
+	Socket &operator=(Socket <UserType> &&other);
 	std::string close();
 	void send(std::string const &data);
 	void sendline(std::string const &data);
@@ -116,29 +118,29 @@ public:
 	std::string unread();
 }; // }}}
 
+template <class UserType>
 class Server { // {{{
-	friend class Socket;
-public:
-	// Callback for newly connected socket. Remote is destroyed after this is called, so it must be moved into a different Socket.
-	typedef void (*ConnectedCb)(Socket &&remote, void *user_data);
-private:
-	struct Listener {	// Data for listening socket; used as user_data for poll events.
+	friend class Socket <UserType>;
+	struct Listener {	// Data for listening socket; used as user for poll events.
 		Server *server;
 		int fd;
-		Socket socket;
+		Socket <UserType> socket;
 		Listener(Server *server, int fd) : server(server), fd(fd), socket(fd, server) {}
 	};
 	Loop *listenloop;
 	std::list <Listener> listeners;
 	int backlog;
-	void *user_data;
-	ConnectedCb connected_cb;
+	void *owner;
 	void open_socket(std::string const &service, int backlog);
-	void remote_disconnect(std::list <Socket *>::iterator socket);
+	void remote_disconnect(std::list <Socket <UserType> *>::iterator socket);
 	static bool accept_remote(void *self_ptr);
 public:
-	std::list <Socket *> remotes;
-	Server(std::string const &service, ConnectedCb cb, Loop::Cb error = nullptr, void *user_data = nullptr, Loop *loop = nullptr, int backlog = 5);
+	std::list <UserType> remotes;
+	template <class OwnerType> Server(std::string const &service, OwnerType *owner = nullptr, void (OwnerType::*error)(std::string const &message) = nullptr, Loop *loop = nullptr, int backlog = 5);
 	void close();
 	~Server() { close(); }
 }; // }}}
+
+#endif
+
+// vim: set fileencoding=utf-8 foldmethod=marker :
