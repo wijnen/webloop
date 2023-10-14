@@ -18,3 +18,5 @@ build/%.o: %.cc ${HEADERS}
 
 %.elf: %.o ${OBJECTS}
 	g++ ${FLAGS} $^ -o $@
+
+.PRECIOUS: ${OBJECTS}

@@ -3,7 +3,8 @@
 class T {
 	Websocket <T> websocket;
 public:
-	T(Socket <T> &&s) : websocket(std::move(s), &T::receiver) {
+	T(Socket <Websocket <T> > &&s, Httpd <T> *server) : websocket(std::move(s), this, &T::receiver) {
+		(void)&server;
 		log("new websocket");
 	}
 	void receiver(std::string const &data) {

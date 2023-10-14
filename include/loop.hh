@@ -64,7 +64,6 @@ private:
 		std::set <int> empty_items;	// Empty items that have lower index than num - 1.
 		PollItems(int initial_capacity = 32) : data(new struct pollfd[initial_capacity]), num(0), capacity(initial_capacity), min_capacity(initial_capacity) {}
 		int add(IoRecord *item);
-		void update(int handle, CbBase *object) { assert(items[handle]->fd < 0); items[handle]->object = object; }
 		void remove(int index);
 		std::string print();
 	}; // }}}
@@ -88,9 +87,6 @@ public:
 	IoHandle add_io(IoRecord &item) { return items.add(&item); }
 	TimeoutHandle add_timeout(TimeoutRecord const &timeout) { timeouts.push_back(timeout); return --timeouts.end(); }
 	IdleHandle add_idle(IdleRecord const &record) { idle.push_back(record); return --idle.end(); }
-
-	void update_io(IoHandle handle, CbBase *object) { items.update(handle, object); }
-	// Update is only allowed when the item is not active, and Timeout and Idle do not have a handle when inactive, so they can't be updated.
 
 	void remove_io(IoHandle handle) { items.remove(handle); }
 	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }

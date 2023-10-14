@@ -106,7 +106,7 @@ public:
 	typedef void (UserType::*Receiver)(std::string const &data);
 private:
 	// Main class implementing the websocket protocol.
-	Socket <UserType> socket;
+	Socket <Websocket <UserType> > socket;
 	std::string buffer;
 	std::string fragments;
 	Loop::TimeoutHandle keepalive_handle;
@@ -134,10 +134,11 @@ public:
 	std::map <std::string, std::string> received_headers;	// Headers that are received from server. (Only for accepted websockets.)
 	void disconnect();
 	Websocket() {}
-	Websocket(std::string const &address, Receiver receiver, ConnectSettings const &connect_settings, RunSettings const &run_settings, UserType *user);
-	Websocket(int socket_fd, Receiver receiver, RunSettings const &run_settings, UserType *user);
-	Websocket(Socket <UserType> &&socket, Receiver receiver = nullptr, RunSettings const &run_settings = {}, UserType *user = nullptr);
+	Websocket(std::string const &address, ConnectSettings const &connect_settings = {}, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
+	Websocket(int socket_fd, UserType *user = nullptr, Receiver receiver = {}, RunSettings const &run_settings = {});
+	Websocket(Socket <Websocket <UserType> > &&src, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
 	// TODO: move constructor and assignment.
+
 	bool keepalive();
 	void read(std::string &data);
 	void send(std::string const &data, int opcode = 1); // Send a WebSocket frame.
@@ -225,8 +226,9 @@ private:
 	UserType *user;					// User data to send with callbacks.
 	std::map <std::string, std::string> exts;	// Handled extensions; value is mime type.
 	Loop *loop;					// Main loop for registering read events.
-	Server <Connection> server;			// Network server which provides the interface.
+	Server <Connection, Httpd <UserType> > server;	// Network server which provides the interface.
 	std::list <Connection> connections;		// Active connections, including non-websockets.
+	std::list <UserType> websockets;		// Active websockets.
 	void new_connection(Socket <UserType> &&remote);
 	virtual char const *authentication(Connection &connection) { (void)&connection; return nullptr; }	// Override to require authentication.
 	virtual bool valid_credentials(Connection &connection) { (void)&connection; return true; }	// Override to check credentials.
@@ -236,6 +238,10 @@ private:
 		if (error)
 			(user->*error)("Error received by server: " + message);
 	} // }}}
+	Connection *create_connection(Socket <Connection> &&socket) { // {{{
+		connections.emplace_back(std::move(socket), server);
+		return &connections.back();
+	} // }}}
 public:
 	Httpd(std::string const &service, std::vector <std::string> const &httpdirs = {}, std::vector <std::string> const &proxy = {}, ErrorCb error = nullptr, Loop *loop = nullptr, int backlog = 5) : // {{{
 			httpdirs(httpdirs),
@@ -244,8 +250,9 @@ public:
 			user(nullptr),
 			exts(),
 			loop(Loop::get(loop)),
-			server(service, this, &Httpd <UserType>::server_error, loop, backlog),
-			connections{}
+			server(service, this, &Httpd <UserType>::create_connection, &Httpd <UserType>::server_error, loop, backlog),
+			connections{},
+			websockets{}
 	{
 		/* Create a webserver.
 		Additional arguments are passed to the network.Server.
@@ -378,7 +385,7 @@ class Httpd <UserType>::Connection { // {{{
 	friend class Httpd <UserType>;
 	static std::map <int, char const *> http_response;	// TODO: this is duplicated if the template is used multiple times; it shouldn't be.
 	Httpd <UserType> *httpd;
-	Socket <UserType> socket;
+	Socket <Connection> socket;
 public:
 	std::map <std::string, std::string> received_headers;
 	std::string method;
@@ -545,7 +552,7 @@ public:
 			// headers = {'Sec-WebSocket-Accept': newkey, 'Connection': 'Upgrade', 'Upgrade': 'WebSocket'}
 			// self.server.reply(self, 101, None, None, headers, close = False)
 			reply(101, {}, {}, {}, false);
-			httpd->cb(std::move(socket), this);
+			httpd->websockets.emplace_back(std::move(socket), this);
 			return;
 		}
 		// Attempt to serve a dynamic page.
@@ -560,7 +567,7 @@ public:
 		// TODO
 		return false;
 	} // }}}
-	Connection(Socket <UserType> &&src, Httpd *server) : // {{{
+	Connection(Socket <Connection> &&src, Httpd *server) : // {{{
 			httpd(server),
 			socket(std::move(src)),
 			received_headers{},
@@ -569,9 +576,9 @@ public:
 			http_version{},
 			prefix{}
 	{
-		socket.disconnect_cb = ignore_disconnect;
+		socket.disconnect_cb = &Connection::ignore_disconnect;
 		socket.user = this;
-		socket.read(read_header, connection_error, httpd->loop);
+		socket.read(&Connection::read_header);
 		if (DEBUG > 2)
 			log((std::ostringstream() << "new connection from " << socket.url.host << ":" << socket.url.service).str());
 	} // }}}

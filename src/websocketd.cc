@@ -26,7 +26,7 @@ void Websocket <UserType>::disconnect() { // {{{
 } // }}}
 
 template <class UserType>
-Websocket <UserType>::Websocket(std::string const &address, Receiver receiver, ConnectSettings const &connect_settings, RunSettings const &run_settings, UserType *user) : // {{{
+Websocket <UserType>::Websocket(std::string const &address, ConnectSettings const &connect_settings, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
 	socket(address, this),
 	buffer(),
 	fragments(),
@@ -165,7 +165,7 @@ Websocket <UserType>::Websocket(std::string const &address, Receiver receiver, C
 } // }}}
 
 template <class UserType>
-Websocket <UserType>::Websocket(int socket_fd, Receiver receiver, RunSettings const &run_settings, UserType *user) : // {{{
+Websocket <UserType>::Websocket(int socket_fd, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
 	socket(socket_fd, this),
 	buffer(),
 	fragments(),
@@ -231,7 +231,7 @@ Websocket <UserType>::Websocket(int socket_fd, Receiver receiver, RunSettings co
 } // }}}
 
 template <class UserType>
-Websocket <UserType>::Websocket(Socket <UserType> &&src, Receiver receiver, RunSettings const &run_settings, UserType *user) : // {{{
+Websocket <UserType>::Websocket(Socket <Websocket <UserType> > &&src, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
 	socket(std::move(src)),
 	buffer(),
 	fragments(),

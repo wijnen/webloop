@@ -71,11 +71,11 @@ std::string Loop::PollItems::print() { // {{{
 	STARTFUNC;
 	std::ostringstream ret;
 	ret << "PollItems num = " << num << "/" << capacity << "(minimum " << min_capacity << "); Items:";
-	for (size_t i = 0; i < (unsigned)capacity; ++i) {
+	for (size_t i = 0; i < (size_t)num; ++i) {
 		ret << "\n\t" << data[i].fd << ": ";
 		if (i < items.size()) {
 			IoRecord &r = *items[i];
-			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << " read:" << (void *)r.read << " write:" << (void *)r.write << " error:" << (void *)r.error << " handle:" << r.handle;
+			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << (r.read ? " read" : "") << (r.write ? " write" : "") << (r.error ? " error" : "") << " handle:" << r.handle;
 		}
 		else
 			ret << "X";
@@ -89,11 +89,11 @@ int Loop::handle_timeouts() { // {{{
 	while (!aborting && !timeouts.empty() && timeouts.begin()->time <= current) {
 		TimeoutRecord rec = *timeouts.begin();
 		timeouts.erase(timeouts.begin());
-		bool keep = (ret.object->*rec.cb)();
+		bool keep = (rec.object->*rec.cb)();
 		if (keep && rec.interval > Duration()) {
 			while (rec.time <= current)
 				rec.time += rec.interval;
-			add_timeout({rec.time, rec.interval, rec.cb, rec.object});
+			add_timeout({rec.time, rec.interval, rec.object, rec.cb});
 		}
 	}
 	if (timeouts.empty())
