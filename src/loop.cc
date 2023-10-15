@@ -4,7 +4,7 @@
 
 using namespace std::literals;
 
-int Loop::PollItems::add(IoRecord *item) { // {{{
+int Loop::PollItems::add(IoRecord const &item) { // {{{
 	// Add an fd; return index.
 	STARTFUNC;
 	size_t ret;
@@ -26,22 +26,26 @@ int Loop::PollItems::add(IoRecord *item) { // {{{
 		// Now there is space at the end.
 		ret = num++;
 	}
-	data[ret].fd = item->fd;
-	data[ret].events = item->events;
+	data[ret].fd = item.fd;
+	data[ret].events = item.events;
+	data[ret].revents = 0;
 	// Add item
 	if (ret < items.size())
 		items[ret] = item;
 	else {
+		log("adding new item; ret = " + std::to_string(ret) + "/" + std::to_string(items.size()));
 		assert(ret == items.size());
 		items.push_back(item);
 	}
-	item->handle = ret;
+	log("adding loop item " + std::to_string(ret));
 	return ret;
 } // }}}
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
 	STARTFUNC;
+	log("removing loop item " + std::to_string(index));
+	assert(index >= 0);
 	assert(data[index].fd >= 0);
 	if (index == num - 1) {
 		--num;
@@ -74,8 +78,8 @@ std::string Loop::PollItems::print() { // {{{
 	for (size_t i = 0; i < (size_t)num; ++i) {
 		ret << "\n\t" << data[i].fd << ": ";
 		if (i < items.size()) {
-			IoRecord &r = *items[i];
-			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << (r.read ? " read" : "") << (r.write ? " write" : "") << (r.error ? " error" : "") << " handle:" << r.handle;
+			IoRecord &r = items[i];
+			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << (r.read ? " read" : "") << (r.write ? " write" : "") << (r.error ? " error" : "");
 		}
 		else
 			ret << "X";
@@ -101,6 +105,17 @@ int Loop::handle_timeouts() { // {{{
 	return (timeouts.begin()->time - current) / 1ms;
 } // }}}
 
+Loop *Loop::get(Loop *arg) { // {{{
+	if (arg) {
+		if (!default_loop)
+			default_loop = arg;
+		return arg;
+	}
+	if (!default_loop)
+		default_loop = &fallback_loop;
+	return default_loop;
+} // }}}
+
 void Loop::iteration(bool block) { // {{{
 	STARTFUNC;
 	// Do a single iteration of the main loop.
@@ -116,19 +131,21 @@ void Loop::iteration(bool block) { // {{{
 		if (ev == 0)
 			continue;
 		if (ev & (POLLERR | POLLNVAL)) {
-			if (!items.items[i]->error || !(items.items[i]->object->*(items.items[i]->error))())
+			if (!items.items[i].error || !(items.items[i].object->*(items.items[i].error))())
 				items.remove(i);
 		}
 		else {
 			if (ev & (POLLIN | POLLPRI)) {
-				if (!items.items[i]->read || !(items.items[i]->object->*(items.items[i]->read))()) {
-					items.remove(i);
+				if (!items.items[i].read || !(items.items[i].object->*(items.items[i].read))()) {
+					if (items.data[i].fd >= 0)
+						items.remove(i);
 					continue;
 				}
 			}
 			if (ev & POLLOUT) {
-				if (!items.items[i]->write || !(items.items[i]->object->*(items.items[i]->write))())
-					items.remove(i);
+				if (!items.items[i].write || !(items.items[i].object->*(items.items[i].write))())
+					if (items.data[i].fd >= 0)
+						items.remove(i);
 			}
 		}
 	}
@@ -171,5 +188,6 @@ void Loop::stop(bool force) { // {{{
 } // }}}
 
 Loop *Loop::default_loop;
+Loop Loop::fallback_loop;
 
 // vim: set foldmethod=marker :

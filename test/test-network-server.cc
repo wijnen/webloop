@@ -1,45 +1,41 @@
 #include "network.hh"
+#include "webobject.hh"
 #include <iostream>
 
-struct Vars {
-	Loop loop;
-	Server server;
-	Socket local;
-	Socket remote;
+class S {
+	std::list <Socket <S> > sockets;
+	Socket <S> local;
+	Server <S, S> server;
+public:
+	S() : sockets(), local(STDIN_FILENO, this), server("8567", this, &S::acceptor) {
+		local.read_lines(&S::stdin_cb);
+	}
+
+	void readcb(std::string &buffer) {
+		std::cerr << WebString(buffer).dump() << std::endl;
+		if (buffer == "exit\n")
+			Loop::get()->stop();
+		buffer.clear();
+	}
+
+	void acceptor(Socket <S> *remote) {
+		for (auto &i: sockets)
+			i.send("New connection.\n");
+		remote->read(&S::readcb);
+		sockets.emplace_back(std::move(*remote));
+	}
+
+	void stdin_cb(std::string const &line) {
+		for (auto &i: sockets)
+			i.send(line + "\n");
+	}
 };
 
-void readcb(std::string &buffer, void *user_data) {
-	Vars *vars = reinterpret_cast <Vars *>(user_data);
-	std::cerr << "\"" << buffer << "\"" << std::endl;
-	if (buffer == "exit\n")
-		vars->loop.stop();
-	buffer.clear();
-}
-
-void stdin_cb(std::string &&line, void *user_data) {
-	Vars *vars = reinterpret_cast <Vars *>(user_data);
-	for (auto i: vars->server.remotes)
-		i->send("'" + line + "'\n");
-}
-
-void acceptor(Socket &&remote, void *user_data) {
-	Vars *vars = reinterpret_cast <Vars *>(user_data);
-	for (auto i: vars->server.remotes)
-		i->send("New connection.\n");
-	vars->remote = std::move(remote);
-	remote.read(readcb);
-}
-
 int main() {
-	//Loop loop;
-	//loop.add_timeout({loop.now() + 1s, 100ms, cb, &loop});
-	//loop.add_idle({icb, nullptr});
-	
-	Vars vars { {}, {"8567", acceptor, nullptr, &vars}, {STDIN_FILENO, &vars}, {} };
-	vars.local.read_lines(stdin_cb);
+	S s;
 	std::cerr << "running" << std::endl;
 	try {
-		vars.loop.run();
+		Loop::get()->run();
 	}
 	catch (char const *msg) {
 		std::cerr << "error: " << msg << std::endl;

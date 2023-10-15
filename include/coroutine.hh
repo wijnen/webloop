@@ -17,6 +17,7 @@
 
 struct coroutine { // {{{
 	struct promise_type;
+	struct CbBase {};	// Not actually the base, the class just uses it as such.
 	using handle_type = std::coroutine_handle <promise_type>;
 	struct promise_type {
 		// from_coroutine = handle(to_coroutine); to_coroutine = Yield(from_coroutine);
@@ -24,12 +25,12 @@ struct coroutine { // {{{
 		std::shared_ptr <WebObject> to_coroutine;
 
 		// Callback is used for launched coroutines. It should not be set for YieldFrom.
-		typedef void (*Cb)(std::shared_ptr <WebObject> ret, void *user_data);
+		typedef void (CbBase::*Cb)(std::shared_ptr <WebObject> ret);
+		CbBase *cb_base;
 		Cb cb;
-		void *user_data;
 
 		// Constructor and related functions.
-		promise_type() : from_coroutine(), to_coroutine(), cb(nullptr) { STARTFUNC; }
+		promise_type() : from_coroutine(), to_coroutine(), cb() { STARTFUNC; }
 		~promise_type() { STARTFUNC; }
 		coroutine get_return_object() { STARTFUNC; return coroutine(handle_type::from_promise(*this)); }
 		std::suspend_always initial_suspend() noexcept { STARTFUNC; return {}; }
@@ -40,8 +41,14 @@ struct coroutine { // {{{
 		std::suspend_always yield_value(std::shared_ptr <WebObject> v) { STARTFUNC; from_coroutine.swap(v); return {}; }
 
 		// co_return can use the callback function, or return the value when used with YieldFrom.
-		std::suspend_always return_value(std::shared_ptr <WebObject> v) { STARTFUNC; from_coroutine.swap(v); if (cb) cb(from_coroutine, user_data); return {}; }
-		void set_cb(Cb new_cb, void *data = nullptr) { STARTFUNC; cb = new_cb; user_data = data; }
+		std::suspend_always return_value(std::shared_ptr <WebObject> v) {
+			STARTFUNC;
+			from_coroutine.swap(v);
+			if (cb)
+				(cb_base->*cb)(from_coroutine);
+			return {};
+		}
+		void set_cb(CbBase *base, Cb new_cb) { STARTFUNC; cb_base = base; cb = new_cb; }
 	};
 	handle_type handle;
 	coroutine(handle_type handle) : handle(handle) { STARTFUNC; }
@@ -51,7 +58,7 @@ struct coroutine { // {{{
 	static std::shared_ptr <WebObject> activate(handle_type *handle, std::shared_ptr <WebObject> to_coroutine = WebNone::create());	// Argument is returned from Yield.
 	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> to_coroutine = WebNone::create()) { return activate(&handle, to_coroutine); }
 	operator bool() { STARTFUNC; return handle.done(); }
-	void set_cb(promise_type::Cb new_cb, void *data = nullptr) { STARTFUNC; handle.promise().set_cb(new_cb, data); }
+	template <class Base> void set_cb(Base *base, void (Base::*new_cb)(std::shared_ptr <WebObject> ret)) { STARTFUNC; handle.promise().set_cb(reinterpret_cast <CbBase *>(base), reinterpret_cast <promise_type::Cb>(new_cb)); }
 	std::shared_ptr <WebObject> result() { return handle.promise().from_coroutine; }
 }; // }}}
 

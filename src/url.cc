@@ -28,13 +28,13 @@ URL::URL(std::string const &url) : src(url) {
 		q = url.find_first_of("/;?#", p + 1);
 		if (q == std::string::npos) {
 			port = url.substr(p);
-			if (service.empty())
-				service = url.substr(p + 1);
+			// Always override scheme if port is specified.
+			service = url.substr(p + 1);
 			return;
 		}
 		port = url.substr(p, q - p);
-		if (service.empty())
-			service = port.substr(1);
+		// Always override scheme if port is specified.
+		service = port.substr(1);
 		p = q;
 	} // }}}
 	if (url[p] == '/') { // path. {{{
@@ -53,7 +53,7 @@ URL::URL(std::string const &url) : src(url) {
 	if (scheme == "unix://")
 		unix = decode(host + path);	// this allows, but does not require, for slashes to be encoded. The purpose is to be able to encode the other special characters.
 	if (url[p] == ';') { // parameters. {{{
-		q = url.find_first_of("?#", ++p);
+		q = url.find_first_of("?#", p);
 		if (q == std::string::npos) {
 			parameters = decode(url.substr(p));
 			return;
@@ -62,7 +62,7 @@ URL::URL(std::string const &url) : src(url) {
 		p = q;
 	} // }}}
 	if (url[p] == '?') { // query. {{{
-		q = url.find_first_of("#", ++p);
+		q = url.find_first_of("#", p);
 		if (q == std::string::npos)
 			rawquery = url.substr(p);
 		else
@@ -137,5 +137,31 @@ std::string URL::decode(std::string const &src) { // {{{
 	}
 	return ret;
 } // }}}
+
+std::string URL::print() const {
+	std::ostringstream ret;
+	ret << "URL(" << src << ") {\n";
+	ret << "\tscheme: " << scheme << "\n";
+	ret << "\thost: " << host << "\n";
+	ret << "\tport: " << port << "\n";
+	ret << "\tpath: " << path << "\n";
+	ret << "\tparameters: " << parameters << "\n";
+	ret << "\tquery (raw): " << rawquery << "\n";
+	ret << "\tfragment: " << fragment << "\n";
+	ret << "Computed:\n";
+	ret << "\tservice: " << service << "\n";
+	ret << "\tunix: " << unix << "\n";
+	ret << "\tquery:\n";
+	for (auto i: query)
+		ret << "\t\t" << i.first << " = " << i.second << "\n";
+	ret << "\tmulti query:\n";
+	for (auto i: multiquery) {
+		ret << "\t\t" << i.first << ":\n";
+		for (auto j: i.second)
+			ret << "\t\t\t" << j << "\n";
+	}
+	ret << "}\n";
+	return ret.str();
+}
 
 // vim: set foldmethod=marker :

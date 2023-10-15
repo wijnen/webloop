@@ -1,7 +1,9 @@
 #include "websocketd.hh"
 
+struct Dummy {};
+
 int main() {
-	auto p = RPC("8000");
+	auto p = RPC <Dummy>("8000");
 	auto coro = p.fgcall("get_version", {}, {});
 	coro();
 	while (!bool(coro))

@@ -35,12 +35,6 @@ sockets.  Connection targets can be specified in several ways.
 // }}}
 
 #include <cassert>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/types.h>
-#include <netdb.h>
-#include <arpa/inet.h>
 #include "webobject.hh"
 #include "network.hh"
 
@@ -59,16 +53,15 @@ sockets.  Connection targets can be specified in several ways.
 // }}} */
 
 // Network sockets. {{{
-template <class UserType>
-bool Socket <UserType>::rawread_impl() { // {{{
+bool SocketBase::rawread_impl() { // {{{
+	STARTFUNC;
 	if (!rawread_cb)
 		return false;
 	(user->*rawread_cb)();
 	return true;
 } // }}}
 
-template <class UserType>
-bool Socket <UserType>::read_impl() { // {{{
+bool SocketBase::read_impl() { // {{{
 	STARTFUNC;
 	if (buffer.empty())
 		buffer = recv();	// Allow moving.
@@ -82,8 +75,7 @@ bool Socket <UserType>::read_impl() { // {{{
 	return true;
 } // }}}
 
-template <class UserType>
-bool Socket <UserType>::handle_read_line_data(std::string &&data) { // {{{
+bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
 	STARTFUNC;
 	if (buffer.empty())
 		buffer = std::move(data);
@@ -98,25 +90,59 @@ bool Socket <UserType>::handle_read_line_data(std::string &&data) { // {{{
 			buffer = buffer.substr(p + 2);
 		else
 			buffer = buffer.substr(p + 1);
-		(user->*read_lines_cb)(std::move(line));
+		(user->*read_lines_cb)(line);
 		p = buffer.find_first_of("\r\n");
 	}
 	return true;
 } // }}}
 
-template <class UserType>
-bool Socket <UserType>::read_lines_impl() { // {{{
+bool SocketBase::read_lines_impl() { // {{{
 	STARTFUNC;
 	return handle_read_line_data(recv());
 } // }}}
 
-template <class UserType>
-Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
-	:
-		SocketBase(-1, address),
-		disconnect_cb(nullptr),
+void SocketBase::finish_move(SocketBase &&other) { // {{{
+	STARTFUNC;
+	*server_data = this;
+	if (other.read_handle >= 0) {
+		// Remove old read callback.
+		current_loop->remove_io(other.read_handle);
+		other.read_handle = -1;
+		other.fd = -1;
+		other.rawread_cb = SocketBase::RawReadType();
+		other.read_cb = SocketBase::ReadType();
+		other.read_lines_cb = SocketBase::ReadLinesType();
+
+		// Set new read callback.
+		CbType read;
+		if (rawread_cb)
+			read = &SocketBase::rawread_impl;
+		else if (read_cb)
+			read = &SocketBase::read_impl;
+		else if (read_lines_cb)
+			read = &SocketBase::read_lines_impl;
+		else
+			throw "read_handle was valid, but no callback was set";
+
+		read_handle = current_loop->add_io(Loop::IoRecord(this, fd, POLLIN | POLLPRI, read, CbType(), &SocketBase::error_impl));
+	}
+} // }}}
+
+SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
+		fd(new_fd),
+		maxsize(4096),
+		current_loop(loop),
+		read_handle(-1),
+		buffer(),
+		server(nullptr),
+		server_data(),
+		user(user),
+		rawread_cb(nullptr),
 		read_cb(nullptr),
-		user(user)
+		read_lines_cb(nullptr),
+		disconnect_cb(nullptr),
+		error_cb(nullptr),
+		url(address)
 {
 	STARTFUNC;
 	/* Create a connection.
@@ -126,6 +152,12 @@ Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
 	prefixed with a hostname and a :.  If no hostname is present,
 	localhost is used.
 	*/
+	
+	// Only connect to url if fd is invalid.
+	if (fd >= 0)
+		return;
+
+	log("connecting to " + url.print());
 
 	if (url.unix.empty() && url.service.empty()) {
 		url.service = std::move(url.host);
@@ -157,6 +189,7 @@ Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
 		fd = -1;
 		for (auto rp = addr; rp; rp = rp->ai_next) {
 			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+			log("attempt to connect; fd = " + std::to_string(fd));
 			if (fd < 0) {
 				std::cerr << "unable to open socket: " << strerror(errno) << std::endl;
 				continue;
@@ -169,6 +202,7 @@ Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
 				fd = -1;
 				continue;
 			}
+			break;
 		}
 		freeaddrinfo(addr);
 		if (fd < 0) {
@@ -178,76 +212,47 @@ Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
 	}
 } // }}}
 
-template <class UserType>
-Socket <UserType>::Socket(Socket &&other) : // {{{
-		SocketBase(std::move(*this)),
+SocketBase::SocketBase(SocketBase &&other) : // {{{
+		fd(other.fd),
+		maxsize(other.maxsize),
+		current_loop(other.current_loop),
+		read_handle(-1),
+		buffer(std::move(other.buffer)),
+		server(other.server),
+		server_data(other.server_data),
+		user(other.user),
+		rawread_cb(other.rawread_cb),
 		read_cb(other.read_cb),
+		read_lines_cb(other.read_lines_cb),
 		disconnect_cb(other.disconnect_cb),
-		user(other.user)
+		error_cb(other.error_cb),
+		url(std::move(other.url))
 {
 	STARTFUNC;
-	other.fd = -1;
-	*server_data = this;
-	current_loop->remove_io(other.read_handle);
-	other.read_handle = -1;
-	Loop::IoRecord read_item;
-	if (rawread_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::rawread_impl, nullptr, &Socket <UserType>::error_impl};
-	else if (read_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_impl, nullptr, &Socket <UserType>::error_impl};
-	else if (read_lines_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_lines_impl, nullptr, &Socket <UserType>::error_impl};
-	else
-		return;
-	read_handle = current_loop->add_io(read_item);
+	finish_move(std::move(other));
 } // }}}
 
-template <class UserType>
-Socket <UserType> &Socket <UserType>::operator=(Socket &&other) { // {{{
+SocketBase &SocketBase::operator=(SocketBase &&other) { // {{{
 	STARTFUNC;
 	unread();
 	fd = other.fd;
-	other.fd = -1;
-	mymaxsize = other.mymaxsize;
+	maxsize = other.maxsize;
 	current_loop = other.current_loop;
 	read_handle = -1;
 	read_cb = other.read_cb;
 	buffer = std::move(other.buffer);
 	server = other.server;
-	server_data = std::move(other.server_data);
+	server_data = other.server_data;
 	disconnect_cb = other.disconnect_cb;
 	user = other.user;
+	rawread_cb = other.rawread_cb;
+	read_cb = other.read_cb;
+	read_lines_cb = other.read_lines_cb;
+	disconnect_cb = other.disconnect_cb;
+	error_cb = other.error_cb;
 	url = std::move(other.url);
-
-	other.fd = -1;
-	*server_data = this;
-	current_loop->remove_io(other.read_handle);
-	other.read_handle = -1;
-	Loop::IoRecord read_item;
-	if (rawread_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::rawread_impl, nullptr, &Socket <UserType>::error_impl};
-	else if (read_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_impl, nullptr, &Socket <UserType>::error_impl};
-	else if (read_lines_cb)
-		read_item = Loop::IoRecord {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_lines_impl, nullptr, &Socket <UserType>::error_impl};
-	else
-		return *this;
-	read_handle = current_loop->add_io(read_item);
+	finish_move(std::move(other));
 	return *this;
-} // }}}
-
-template <class UserType> template <class OtherType>
-Socket <UserType>::Socket(Socket <OtherType> &&other) : // {{{
-		SocketBase(std::move(*this)),
-		read_cb(nullptr),
-		disconnect_cb(other.disconnect_cb),
-		user(other.user)
-{
-	STARTFUNC;
-	other.unread();
-	other.fd = -1;
-	*server_data = this;
-	other.read_handle = -1;
 } // }}}
 
 std::string SocketBase::close() { // {{{
@@ -262,12 +267,11 @@ std::string SocketBase::close() { // {{{
 	if (server)
 		server->remote_disconnect(this->server_data);
 	if (disconnect_cb)
-		return (user->*disconnect_cb)(pending);
+		(user->*disconnect_cb)();
 	return pending;
 } // }}}
 
-template <class UserType>
-void Socket <UserType>::send(std::string const &data) { // {{{
+void SocketBase::send(std::string const &data) { // {{{
 	STARTFUNC;
 	/* Send data over the network.
 	Send data over the network.  Block until all data is in the buffer.
@@ -289,8 +293,7 @@ void Socket <UserType>::send(std::string const &data) { // {{{
 	}
 } // }}}
 
-template <class UserType>
-void Socket <UserType>::sendline(std::string const &data) { // {{{
+void SocketBase::sendline(std::string const &data) { // {{{
 	STARTFUNC;
 	// Send a line of text.
 	// Identical to send(), but data is a str and a newline is added.
@@ -299,8 +302,7 @@ void Socket <UserType>::sendline(std::string const &data) { // {{{
 	send(data + "\n");
 } // }}}
 
-template <class UserType>
-std::string Socket <UserType>::recv() { // {{{
+std::string SocketBase::recv() { // {{{
 	STARTFUNC;
 	/* Read data from the network.
 	Data is read from the network.  If the socket is not set to
@@ -318,8 +320,8 @@ std::string Socket <UserType>::recv() { // {{{
 		log("recv on closed socket");
 		throw "recv on closed socket";
 	}
-	char buffer[mymaxsize];
-	auto num = ::read(fd, buffer, mymaxsize);
+	char buffer[maxsize];
+	auto num = ::read(fd, buffer, maxsize);
 	if (num < 0) {
 		log("Error reading from socket");
 		return close();
@@ -335,8 +337,7 @@ std::string Socket <UserType>::recv() { // {{{
 	return std::string(buffer, num);
 } // }}}
 
-template <class UserType>
-std::string Socket <UserType>::rawread(void (UserType::*cb)()) { // {{{
+std::string SocketBase::rawread_base(RawReadType callback) { // {{{
 	STARTFUNC;
 	/* Register function to be called when data is ready for reading.
 	The function will be called when data is ready.  The callback
@@ -349,14 +350,13 @@ std::string Socket <UserType>::rawread(void (UserType::*cb)()) { // {{{
 	if (fd < 0)
 		return std::string();
 	std::string ret = unread();
-	rawread_cb = cb;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &Socket <UserType>::rawread_impl, nullptr, &Socket <UserType>::error_impl};
-	current_loop->add_io(read_item);
+	rawread_cb = callback;
+	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
+	read_handle = current_loop->add_io(read_item);
 	return ret;
 } // }}}
 
-template <class UserType>
-void Socket <UserType>::read(ReadCb callback, size_t maxsize) { // {{{
+void SocketBase::read_base(ReadType callback) { // {{{
 	STARTFUNC;
 	/* Register function to be called when data is received.
 	When data is available, read it and call this function.  The
@@ -374,16 +374,15 @@ void Socket <UserType>::read(ReadCb callback, size_t maxsize) { // {{{
 	if (fd < 0)
 		return;
 	std::string first = unread();
-	mymaxsize = maxsize;
+	maxsize = maxsize;
 	read_cb = callback;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_impl, nullptr, &Socket <UserType>::error_impl};
-	current_loop->add_io(read_item);
+	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::read_impl, CbType(), &SocketBase::error_impl};
+	read_handle = current_loop->add_io(read_item);
 	if (!first.empty())
 		(user->*read_cb)(first);
 } // }}}
 
-template <class UserType>
-void Socket <UserType>::read_lines(ReadLinesCb callback, size_t maxsize) { // {{{
+void SocketBase::read_lines_base(ReadLinesType callback) { // {{{
 	STARTFUNC;
 	/* Buffer incoming data until a line is received, then call a function.
 	When a newline is received, all data up to that point is
@@ -400,16 +399,15 @@ void Socket <UserType>::read_lines(ReadLinesCb callback, size_t maxsize) { // {{
 	if (fd < 0)
 		return;
 	std::string first = unread();
-	mymaxsize = maxsize;
+	maxsize = maxsize;
 	read_lines_cb = callback;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &Socket <UserType>::read_lines_impl, nullptr, &Socket <UserType>::error_impl};
-	current_loop->add_io(read_item);
+	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::read_lines_impl, CbType(), &SocketBase::error_impl};
+	read_handle = current_loop->add_io(read_item);
 	if (!first.empty())
 		handle_read_line_data(std::move(first));
 } // }}}
 
-template <class UserType>
-std::string Socket <UserType>::unread() { // {{{
+std::string SocketBase::unread() { // {{{
 	STARTFUNC;
 	/* Cancel a read() or rawread() callback.
 	Cancel any read callback.
@@ -419,6 +417,9 @@ std::string Socket <UserType>::unread() { // {{{
 	if (read_handle >= 0) {
 		current_loop->remove_io(read_handle);
 		read_handle = -1;
+		rawread_cb = SocketBase::RawReadType();
+		read_cb = SocketBase::ReadType();
+		read_lines_cb = SocketBase::ReadLinesType();
 	}
 	std::string ret = std::move(buffer);
 	buffer.clear();
@@ -433,8 +434,7 @@ void ServerBase::remote_disconnect(std::list <SocketBase *>::iterator socket) { 
 	remotes.erase(socket);
 } // }}}
 
-template <class UserType>
-void Server <UserType>::open_socket(std::string const &service, int backlog) { // {{{
+void ServerBase::open_socket(std::string const &service, int backlog) { // {{{
 	STARTFUNC;
 	// Open the listening socket(s).
 	auto p = service.find("/");
@@ -494,8 +494,7 @@ void Server <UserType>::open_socket(std::string const &service, int backlog) { /
 	}
 } // }}}
 
-template <class UserType>
-bool Server <UserType>::Listener::accept_remote() { // {{{
+void ServerBase::Listener::accept_remote() { // {{{
 	STARTFUNC;
 	struct sockaddr_un addr;	// Use largest struct; cast down for others.
 	socklen_t addrlen = sizeof(addr);
@@ -504,7 +503,8 @@ bool Server <UserType>::Listener::accept_remote() { // {{{
 		std::cerr << "Warning: remote address is truncated" << std::endl;
 		addrlen = sizeof(addr);
 	}
-	Socket <UserType> remote(new_fd, nullptr);
+	// Create a generic socket; move it to the correct type later.
+	Socket <SocketBase::UserBase> remote(new_fd, nullptr);
 	server->remotes.push_back(&remote);
 	remote.server = server;
 	remote.server_data = --server->remotes.end();
@@ -547,24 +547,26 @@ bool Server <UserType>::Listener::accept_remote() { // {{{
 		std::cerr << "unknown address family for remote socket; not reading remote details." << std::endl;
 		break;
 	}
-	remote.user = (reinterpret_cast <Loop::CbBase *>(owner)->*create)(std::move(remote));
-	return true;
+	(reinterpret_cast <ServerBase::OwnerBase *>(server->owner)->*(server->create_cb))(&remote);
 } // }}}
 
-template <class UserType> template <class OwnerType>
-Server <UserType>::Server( // {{{
+ServerBase::ServerBase( // {{{
 		std::string const &service,
-		OwnerType *owner,
-		UserType * (OwnerType::*create)(Socket <UserType> &&socket),
-		void (OwnerType::*error)(std::string const &message),
+		OwnerBase *owner,
+		CreateType create,
+		ClosedType closed,
+		ErrorType error,
 		Loop *loop,
 		int backlog
 	) :
 		listenloop(Loop::get(loop)),
 		listeners(),
-		backlog(backlog),
+		active_backlog(backlog),
+		remotes(),
 		owner(owner),
-		remotes()
+		create_cb(create),
+		closed_cb(closed),
+		error_cb(error)
 {
 	STARTFUNC;
 	open_socket(service, backlog);
@@ -573,8 +575,7 @@ Server <UserType>::Server( // {{{
 	}
 } // }}}
 
-template <class UserType>
-void Server <UserType>::close() { // {{{
+void ServerBase::close() { // {{{
 	STARTFUNC;
 	assert(!listeners.empty());
 	while (!remotes.empty())

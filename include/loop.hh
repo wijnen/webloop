@@ -17,28 +17,29 @@ public:
 	typedef bool (CbBase::*Cb)();
 
 	struct IoRecord { // {{{
+		typedef bool (CbBase::*CbType)();
 		CbBase *object;
 		int fd;
 		short events;
 		Cb read;
 		Cb write;
 		Cb error;
-		int handle;
 		template <class UserType>
 		IoRecord(UserType *obj, int fd, short events, bool (UserType::*r)(), bool (UserType::*w)(), bool (UserType::*e)()) :
 			object(reinterpret_cast <CbBase *>(obj)),
 			fd(fd),
 			events(events),
-			read(reinterpret_cast <bool (CbBase::*)()>(r)),
-			write(reinterpret_cast <bool (CbBase::*)()>(w)),
-			error(reinterpret_cast <bool (CbBase::*)()>(e)),
-			handle(-1)
+			read(reinterpret_cast <CbType>(r)),
+			write(reinterpret_cast <CbType>(w)),
+			error(reinterpret_cast <CbType>(e))
 		{}
 	}; // }}}
 
 	struct IdleRecord {
 		CbBase *object;
 		Cb cb;
+		// Allow initializing this struct from any base class, as long as the cb matches the object.
+		template <class Base> IdleRecord(Base *object, bool (Base::*cb)()) : object(reinterpret_cast <CbBase *>(object)), cb(reinterpret_cast <Cb>(cb)) {}
 	};
 	typedef std::list <IdleRecord>::iterator IdleHandle;
 
@@ -48,6 +49,7 @@ public:
 		CbBase *object;
 		Cb cb;
 		bool operator<(TimeoutRecord const &other) const { return time < other.time; }
+		template <class Base> TimeoutRecord(Time const &time, Duration interval, Base *object, bool (Base::*cb)()) : time(time), interval(interval), object(reinterpret_cast <CbBase *>(object)), cb(reinterpret_cast <Cb>(cb)) {}
 	};
 	typedef std::list <TimeoutRecord>::iterator TimeoutHandle;
 
@@ -57,17 +59,19 @@ public:
 private:
 	struct PollItems { // {{{
 		struct pollfd *data;
-		std::vector <IoRecord *> items;
+		std::vector <IoRecord> items;
 		int num;
 		int capacity;
 		int min_capacity;
 		std::set <int> empty_items;	// Empty items that have lower index than num - 1.
 		PollItems(int initial_capacity = 32) : data(new struct pollfd[initial_capacity]), num(0), capacity(initial_capacity), min_capacity(initial_capacity) {}
-		int add(IoRecord *item);
+		~PollItems() { delete[] data; }
+		int add(IoRecord const &item);
 		void remove(int index);
 		std::string print();
 	}; // }}}
 
+	static Loop fallback_loop;
 	static Loop *default_loop;
 	bool running;
 	bool aborting;
@@ -76,7 +80,7 @@ private:
 	std::list <TimeoutRecord> timeouts;
 
 public:
-	static Loop *get(Loop *arg = nullptr) { return arg ? arg : default_loop ? default_loop : new Loop(); }
+	static Loop *get(Loop *arg = nullptr);
 	Loop() : running(false), aborting(false) { if (!default_loop) default_loop = this; }
 	Time now() { return std::chrono::steady_clock::now(); }
 	int handle_timeouts();
@@ -84,7 +88,7 @@ public:
 	void run();
 	void stop(bool force = false);
 
-	IoHandle add_io(IoRecord &item) { return items.add(&item); }
+	IoHandle add_io(IoRecord const &item) { return items.add(item); }
 	TimeoutHandle add_timeout(TimeoutRecord const &timeout) { timeouts.push_back(timeout); return --timeouts.end(); }
 	IdleHandle add_idle(IdleRecord const &record) { idle.push_back(record); return --idle.end(); }
 
