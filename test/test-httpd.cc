@@ -1,20 +1,23 @@
 #include "websocketd.hh"
 
+class S {
+};
+
 class T {
-	Websocket <T> websocket;
+	Webloop::Websocket <T> websocket;
 public:
-	T(Socket <Httpd <T>::Connection> &&s, Httpd <T> *server) : websocket(std::move(s), this, &T::receiver) {
+	T(Webloop::Httpd <T, S>::NewSocket &&s, Webloop::Httpd <T, S> *server) : websocket(std::move(s), this, &T::receiver) {
 		(void)&server;
-		log("new websocket");
+		WL_log("new websocket");
 	}
 	void receiver(std::string const &data) {
-		log("received:" + WebString(data).dump());
+		WL_log("received:" + Webloop::WebString(data).dump());
 	}
 };
 
-
 int main() {
-	Httpd <T> httpd("5376");
-	Loop::get()->run();
+	S s;
+	Webloop::Httpd <T, S> httpd(&s, "5376");
+	Webloop::Loop::get()->run();
 	return 0;
 }

@@ -5,6 +5,8 @@
 #include <map>
 #include <list>
 
+namespace Webloop {
+
 struct URL {
 	// <scheme>:// <host> :<port> /<path> ;<parameters> ?<query> #<fragment>
 	std::string src;
@@ -19,8 +21,11 @@ struct URL {
 	std::string build_request();
 	static std::string encode(std::string const &src, std::string::size_type pos = 0);	// Copy first pos characters, encode the rest.
 	static std::string decode(std::string const &src);
+	void clear();
 	std::string print() const;
 };
+
+}
 
 #endif
 

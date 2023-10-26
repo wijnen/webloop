@@ -8,6 +8,8 @@
 #include <poll.h>
 #include <cassert>
 
+namespace Webloop {
+
 class Loop {
 public:
 	// Types. {{{
@@ -96,6 +98,8 @@ public:
 	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }
 	void remove_idle(IdleHandle handle) { idle.erase(handle); }
 };
+
+}
 
 #endif
 

@@ -1,0 +1,7 @@
+WEBLOOP_1 {
+	global:
+		*Webloop*;
+
+	local:
+		*;
+};

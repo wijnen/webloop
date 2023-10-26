@@ -15,6 +15,8 @@
 #include <memory>
 // }}}
 
+namespace Webloop {
+
 struct coroutine { // {{{
 	struct promise_type;
 	struct CbBase {};	// Not actually the base, the class just uses it as such.
@@ -86,17 +88,21 @@ struct GetHandleAwaiter { // {{{
 #define Yield(from_coroutine) (co_await YieldAwaiter(from_coroutine))
 
 // Similar to Python's "yield from". Usage:
-// YieldFrom(auto, variable_name, coroutine, first_argument);
-// std::shared_ptr <WebObject> variable_name; YieldFrom(, variable_name, coroutine, first_argument);
-#define YieldFromFull(vardef, var, target, firstarg) \
-	vardef var = target(firstarg); \
+// YieldFromFull(variable_name, coroutine, first_argument);
+// Or
+// auto YieldFrom(variable_name, coroutine);
+// std::shared_ptr <WebObject> variable_name; YieldFrom(variable_name, coroutine);
+#define YieldFromFull(var, target, firstarg) \
+	var = target(firstarg); \
 	while (!bool(target)) { \
 		std::shared_ptr <WebObject> next = Yield(var); \
 		var = target(next); \
 	}
 // Syntactic sugar for common case.
-#define YieldFrom(var, target) YieldFromFull(auto, var, target, WebNone::create())
+#define YieldFrom(var, target) YieldFromFull(var, target, WebNone::create())
 // }}}
+
+}
 
 #endif
 

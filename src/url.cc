@@ -3,6 +3,8 @@
 #include "url.hh"
 #include "tools.hh"
 
+namespace Webloop {
+
 URL::URL(std::string const &url) : src(url) {
 	// Find scheme. {{{
 	auto q = url.find(':');
@@ -87,7 +89,6 @@ URL::URL(std::string const &url) : src(url) {
 			key = decode(kv.substr(0, p));
 			value = decode(kv.substr(p + 1));
 		}
-		// TODO: decode key and value.
 		if (!multiquery.contains(key)) {
 			multiquery[key] = std::list <std::string> ();
 			query[key] = value;
@@ -129,7 +130,7 @@ std::string URL::decode(std::string const &src) { // {{{
 			return ret;
 		}
 		if (q + 3 > src.size()) {
-			log("Warning: decode found incomplete escape");
+			WL_log("Warning: decode found incomplete escape");
 		}
 		ret += src.substr(pos, q - pos);
 		ret += char(std::stoi(src.substr(q + 1, 2), nullptr, 16) & 0xff);
@@ -138,7 +139,7 @@ std::string URL::decode(std::string const &src) { // {{{
 	return ret;
 } // }}}
 
-std::string URL::print() const {
+std::string URL::print() const { // {{{
 	std::ostringstream ret;
 	ret << "URL(" << src << ") {\n";
 	ret << "\tscheme: " << scheme << "\n";
@@ -162,6 +163,23 @@ std::string URL::print() const {
 	}
 	ret << "}\n";
 	return ret.str();
+} // }}}
+
+void URL::clear() { // {{{
+	src.clear();
+	scheme.clear();
+	host.clear();
+	port.clear();
+	path.clear();
+	parameters.clear();
+	rawquery.clear();
+	fragment.clear();
+	service.clear();
+	unix.clear();
+	query.clear();
+	multiquery.clear();
+} // }}}
+
 }
 
 // vim: set foldmethod=marker :

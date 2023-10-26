@@ -4,6 +4,8 @@
 
 using namespace std::literals;
 
+namespace Webloop {
+
 int Loop::PollItems::add(IoRecord const &item) { // {{{
 	// Add an fd; return index.
 	STARTFUNC;
@@ -33,18 +35,18 @@ int Loop::PollItems::add(IoRecord const &item) { // {{{
 	if (ret < items.size())
 		items[ret] = item;
 	else {
-		log("adding new item; ret = " + std::to_string(ret) + "/" + std::to_string(items.size()));
+		WL_log("adding new item; ret = " + std::to_string(ret) + "/" + std::to_string(items.size()));
 		assert(ret == items.size());
 		items.push_back(item);
 	}
-	log("adding loop item " + std::to_string(ret));
+	WL_log("adding loop item " + std::to_string(ret));
 	return ret;
 } // }}}
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
 	STARTFUNC;
-	log("removing loop item " + std::to_string(index));
+	WL_log("removing loop item " + std::to_string(index));
 	assert(index >= 0);
 	assert(data[index].fd >= 0);
 	if (index == num - 1) {
@@ -161,7 +163,7 @@ void Loop::run() { // {{{
 	aborting = false;
 	while (running) {
 		if (DEBUG > 4)
-			log("running, items = " + items.print());
+			WL_log("running, items = " + items.print());
 		iteration(idle.empty());
 		if (!running)
 			continue;
@@ -189,5 +191,7 @@ void Loop::stop(bool force) { // {{{
 
 Loop *Loop::default_loop;
 Loop Loop::fallback_loop;
+
+}
 
 // vim: set foldmethod=marker :

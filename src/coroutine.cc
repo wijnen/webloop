@@ -1,5 +1,7 @@
 #include "coroutine.hh"
 
+namespace Webloop {
+
 std::shared_ptr <WebObject> coroutine::activate(coroutine::handle_type *handle, std::shared_ptr <WebObject> to_coroutine) { // {{{
 	STARTFUNC;
 	if (handle->done())
@@ -36,5 +38,7 @@ bool YieldAwaiter::await_suspend(coroutine::handle_type handle) { // {{{
 	from_coroutine.reset();
 	return true;
 } // }}}
+
+}
 
 // vim: set foldmethod=marker :

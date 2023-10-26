@@ -22,19 +22,21 @@
 #include <cassert>
 #include <cstring>
 
+namespace Webloop {
+
 // Globals. {{{
-std::vector <std::string> Fhs::arguments;
+std::vector <std::string> arguments;
 /// Flag that is set to true when init() is called.
-Fhs::InitState Fhs::initialized = UNINITIALIZED;
+InitState initialized = UNINITIALIZED;
 /// Flag that is set during init() if --system was specified, or the application set this directly; that should be done before calling init().
 /// It should be set to true or false; it's defined as an int to detect it not having been set, to disable the --system option if it was forced to false.
-int Fhs::is_system = -1;
+int is_system = -1;
 /// Flag that is set before calling init() by the application if this is a game (makes it use /usr/games instead of /usr/bin).
-bool Fhs::is_game = false;
+bool is_game = false;
 /// Default program name; can be overridden from functions that use it. Default value is set in init().
-std::string Fhs::pname;
+std::string pname;
 /// Current user's home directory.
-std::filesystem::path Fhs::HOME
+std::filesystem::path HOME
 	= []() -> std::filesystem::path {
 		char const *home = std::getenv("HOME");
 		if (home)
@@ -44,7 +46,7 @@ std::filesystem::path Fhs::HOME
 // Internal variables. This is a singleton class anyway, so make them globals to keep them out of the header file.
 static std::filesystem::path _base;
 struct AtinitRecord {
-	Fhs::generic_cb cb;
+	generic_cb cb;
 	void *data;
 };
 static std::list <AtinitRecord> _atinit;
@@ -57,10 +59,10 @@ static Info _info;
 static std::filesystem::path _temp_file_dir;
 // }}}
 
-std::list <Fhs::OptionBase *> Fhs::OptionBase::all_options;
+std::list <OptionBase *> OptionBase::all_options;
 
-Fhs::OptionBase::OptionBase(std::string const &name, std::string const &help, bool must_have_parameter, bool can_have_parameter, OptArg const *args, bool store) // {{{
-		: name(name), help(help), must_have_parameter(must_have_parameter), can_have_parameter(can_have_parameter), args(*args)
+OptionBase::OptionBase(std::string const &name, std::string const &help, bool must_have_parameter, bool can_have_parameter, bool multiple, char shortopt, bool store) // {{{
+		: name(name), help(help), must_have_parameter(must_have_parameter), can_have_parameter(can_have_parameter), multiple(multiple), shortopt(shortopt)
 {
 	if (store) {
 		if (initialized == UNINITIALIZED)
@@ -73,33 +75,43 @@ Fhs::OptionBase::OptionBase(std::string const &name, std::string const &help, bo
 // Option overrides. {{{
 // Override for default value of double options.
 template <>
-Fhs::Option <double>::Option(std::string const &name, std::string const &help, OptArg &&args)
-		: OptionBase(name, help, true, true, &args, true), value(NAN), default_value(NAN), default_noarg(0) {}
+Option <double>::Option(std::string const &name, std::string const &help, char shortopt)
+		: OptionBase(name, help, true, true, false, shortopt, true), value(NAN), default_value(NAN), default_noarg(0), has_parameter(false) {}
+
+template <>
+MultiOption <double>::MultiOption(std::string const &name, std::string const &help, char shortopt)
+		: OptionBase(name, help, true, true, true, shortopt, true), value(), default_noarg(0), has_parameter() {}
 
 // Override constructor defaults for BoolOption.
 template <>
-Fhs::Option <bool>::Option(std::string const &name, std::string const &help, OptArg &&args)
-		: OptionBase(name, help, false, false, &args, true), value(false), default_value(false), default_noarg(true) {}
+Option <bool>::Option(std::string const &name, std::string const &help, char shortopt)
+		: OptionBase(name, help, false, false, false, shortopt, true), value(false), default_value(false), default_noarg(true), has_parameter(false) {}
 template <>
-Fhs::Option <bool>::Option(std::string const &name, std::string const &help, OptArg &&args, bool const &default_value)
-		: OptionBase(name, help, false, false, &args, true), value(default_value), default_value(default_value), default_noarg(!default_value) {}
+Option <bool>::Option(std::string const &name, std::string const &help, char shortopt, bool const &default_value)
+		: OptionBase(name, help, false, false, false, shortopt, true), value(default_value), default_value(default_value), default_noarg(!default_value), has_parameter(false) {}
 template <>
-Fhs::Option <bool>::Option(std::string const &name, std::string const &help, OptArg &&args, bool const &default_value, bool const &default_noarg)
-		: OptionBase(name, help, false, false, &args, true), value(default_value), default_value(default_value), default_noarg(default_noarg) {}
+Option <bool>::Option(std::string const &name, std::string const &help, char shortopt, bool const &default_value, bool const &default_noarg)
+		: OptionBase(name, help, false, false, false, shortopt, true), value(default_value), default_value(default_value), default_noarg(default_noarg), has_parameter(false) {}
+template <>
+MultiOption <bool>::MultiOption(std::string const &name, std::string const &help, char shortopt)
+		: OptionBase(name, help, false, false, true, shortopt, true), value(), default_noarg(true), has_parameter() {}
+template <>
+MultiOption <bool>::MultiOption(std::string const &name, std::string const &help, char shortopt, bool const &default_noarg)
+		: OptionBase(name, help, false, false, true, shortopt, true), value(), default_noarg(default_noarg), has_parameter() {}
 
 // Override parse and print functions for strings.
-template <> void Fhs::Option <std::string>::parse(std::string const &param) { // {{{
+static std::string parse_string(std::string const &src) { // {{{
 	std::ostringstream ret;
-	auto p = param.begin();
-	while (p != param.end()) {
+	auto p = src.begin();
+	while (p != src.end()) {
 		if (*p == '\\') {
 			++p;
-			auto n = std::find(p, param.end(), ';');
-			if (n == param.end()) {
+			auto n = std::find(p, src.end(), ';');
+			if (n == src.end()) {
 				// Ignore invalid escape.
 				break;
 			}
-			std::string sub = param.substr(p - param.begin(), n - p);
+			std::string sub = src.substr(p - src.begin(), n - p);
 			ret << char(atoi(sub.c_str()));
 			p = n + 1;
 		}
@@ -110,15 +122,24 @@ template <> void Fhs::Option <std::string>::parse(std::string const &param) { //
 			++p;
 		}
 	}
-	value = ret.str();
+	return ret.str();
 } // }}}
 
-template <> std::string Fhs::Option <std::string>::print(PrintType type) const { // {{{
+template <> void Option <std::string>::parse(std::string const &param) { has_parameter = true; value = parse_string(param); }
+template <> void MultiOption <std::string>::parse(std::string const &param) { // {{{
+	has_parameter.push_back(true);
+	value.push_back(parse_string(param));
+} // }}}
+
+template <> std::string Option <std::string>::print(PrintType type) const { // {{{
 	std::ostringstream ret;
 	std::string target;
 	switch (type) {
+	case PRINT_STORE:
+		target = name + '=';
+		// Fall through.
 	case PRINT_VALUE:
-		target = value;
+		target += value;
 		break;
 	case PRINT_DEFAULT:
 		target = default_value;
@@ -132,6 +153,51 @@ template <> std::string Fhs::Option <std::string>::print(PrintType type) const {
 			ret << "\\" << std::hex << x << ";";
 		else
 			ret << x;
+	}
+	if (type == PRINT_STORE)
+		return ret.str() + "\n";
+	else
+		return ret.str();
+} // }}}
+
+static std::string print_string(std::string const &target) {
+	std::ostringstream ret;
+	for (auto x: target) {
+		if (x < 32 || x >= 127 || x == '\\')
+			ret << "\\" << std::hex << x << ";";
+		else
+			ret << x;
+	}
+	return ret.str();
+}
+
+template <> std::string MultiOption <std::string>::print(PrintType type) const { // {{{
+	switch (type) {
+	case PRINT_STORE:
+	{
+		std::string ret;
+		auto v = value.begin();
+		auto p = has_parameter.begin();
+		for (; v != value.end(); ++v, ++p) {
+			if (!*p)
+				ret += name + "\n";
+			else
+				ret += name + "=" + print_string(*v) + "\n";
+		}
+		return ret;
+	}
+	case PRINT_VALUE:
+		break;
+	case PRINT_DEFAULT:
+		return {};
+	case PRINT_DEFAULT_NOARG:
+		return print_string(default_noarg);
+	}
+	std::ostringstream ret;
+	std::string sep = "";
+	for (auto &part: value) {
+		ret << sep << print_string(part);
+		sep = "\t";
 	}
 	return ret.str();
 } // }}}
@@ -160,20 +226,20 @@ static std::filesystem::path write_name( // {{{
 	@param dir: Return directory name if true, filename otherwise.
 	@return The name of the file or directory.
 	*/
-	assert(Fhs::initialized != Fhs::UNINITIALIZED);
-	std::filesystem::path filename = packagename.empty() ? Fhs::pname : packagename;
+	assert(initialized != UNINITIALIZED);
+	std::filesystem::path filename = packagename.empty() ? pname : packagename;
 	if (name.empty()) {
 		if (!dir)
 			filename += default_ext;
 	}
-	else if (Fhs::is_system)
+	else if (is_system)
 		filename = name;
 	else
 		filename /= name;
 	std::filesystem::path d;
-	if (Fhs::is_system) {
-		d = system_path / Fhs::pname;
-		if (packagename.size() != 0 && packagename != Fhs::pname)
+	if (is_system) {
+		d = system_path / pname;
+		if (packagename.size() != 0 && packagename != pname)
 			d /= packagename;
 	}
 	else
@@ -205,9 +271,9 @@ static std::list <std::filesystem::path> read_names( // {{{
 	@param packagename: Override the packagename.
 	@return The opened file, or the name of the file or directory.
 	*/
-	assert(Fhs::initialized != Fhs::UNINITIALIZED);
+	assert(initialized != UNINITIALIZED);
 	std::filesystem::path filename;
-	std::string pkg = packagename.empty() ? Fhs::pname : packagename;
+	std::string pkg = packagename.empty() ? pname : packagename;
 	if (name.empty()) {
 		filename = pkg;
 		if (!dir)
@@ -227,7 +293,7 @@ static std::list <std::filesystem::path> read_names( // {{{
 		return false;
 	};
 
-	if (!Fhs::is_system) {
+	if (!is_system) {
 		std::filesystem::path t = home / (name.empty() ? filename : std::filesystem::path(pkg) / name);
 		if (!contains(t) && (dir ? std::filesystem::is_directory(t) : std::filesystem::is_regular_file(t))) {
 			result.push_back(t);
@@ -237,16 +303,16 @@ static std::list <std::filesystem::path> read_names( // {{{
 		}
 	}
 	std::list <std::filesystem::path> dirs = system_paths;
-	if (!Fhs::is_system)
+	if (!is_system)
 		dirs.insert(dirs.end(), paths.begin(), paths.end());
 	std::list <std::filesystem::path> all_dirs, packagename_dirs;
-	if (!Fhs::is_system)
+	if (!is_system)
 		all_dirs = {pkg, std::filesystem::current_path(), _base};
-	bool build_packagename_dirs = !packagename.empty() && packagename != Fhs::pname;
+	bool build_packagename_dirs = !packagename.empty() && packagename != pname;
 	for (auto d: dirs) {
 		if (build_packagename_dirs)
 			packagename_dirs.push_back(d / packagename);
-		all_dirs.push_back(d / Fhs::pname);
+		all_dirs.push_back(d / pname);
 	}
 	if (build_packagename_dirs)
 		all_dirs.insert(all_dirs.end(), packagename_dirs.begin(), packagename_dirs.end());
@@ -265,7 +331,7 @@ static std::list <std::filesystem::path> read_names( // {{{
 
 // Configuration files. {{{
 /// XDG home directory.
-std::filesystem::path Fhs::XDG_CONFIG_HOME
+std::filesystem::path XDG_CONFIG_HOME
 	= []() -> std::filesystem::path {
 		char const *envname = std::getenv("XDG_CONFIG_HOME");
 		if (envname)
@@ -273,13 +339,13 @@ std::filesystem::path Fhs::XDG_CONFIG_HOME
 		return HOME / ".config";
 	}();
 /// XDG config directory search path.
-std::list <std::filesystem::path> Fhs::XDG_CONFIG_DIRS;
+std::list <std::filesystem::path> XDG_CONFIG_DIRS;
 
 // The only point of non-binary mode is to make the files less useful in Windows. That is never useful, so always open everything as binary.
 static auto write_mode = std::ios::out | std::ios::binary;
 static auto read_mode = std::ios::in | std::ios::binary;
 
-std::filesystem::path Fhs::write_config_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_config_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a config file for writing.  The file is not truncated if it exists.
 	@param name: Name of the config file.
 	@param create: Create directories.
@@ -289,15 +355,15 @@ std::filesystem::path Fhs::write_config_name(std::string const &name, bool creat
 	*/
 	return write_name(XDG_CONFIG_HOME, "/etc/xdg", ".cfg", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_config_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_config_file(std::string const &name, std::string const &packagename) { // {{{
 	std::filesystem::path filename = write_config_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_config_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_config_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	return write_config_name(name, create, packagename, true);
 } // }}}
 
-std::list <std::filesystem::path> Fhs::read_config_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
+std::list <std::filesystem::path> read_config_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
 	/**Open a config file for reading.  The paramers should be identical to what was used to create the file with write_config().
 	@param name: Name of the config file.
 	@param dir: Return a directory name if true, a file or filename if false (the default).
@@ -307,17 +373,17 @@ std::list <std::filesystem::path> Fhs::read_config_names(std::string const &name
 	*/
 	return read_names(XDG_CONFIG_HOME, {"/etc/xdg", "/usr/local/etc/xdg"}, XDG_CONFIG_DIRS, ".cfg", name, packagename, dir, multiple);
 } // }}}
-std::ifstream Fhs::read_config_file(std::string const &name, std::string const &packagename) { // {{{
+std::ifstream read_config_file(std::string const &name, std::string const &packagename) { // {{{
 	auto names = read_config_names(name, packagename, false, false);
 	if (names.empty())
 		return std::ifstream();
 	return std::ifstream(names.front(), read_mode);
 } // }}}
-std::filesystem::path Fhs::read_config_dir(std::string const &name, std::string const &packagename) { // {{{
+std::filesystem::path read_config_dir(std::string const &name, std::string const &packagename) { // {{{
 	return read_config_names(name, packagename, true, false).front();
 } // }}}
 
-void Fhs::remove_config_file(std::string const &name, std::string const &packagename) { // {{{
+void remove_config_file(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a config file.  Use the same parameters as were used to create it with write_config_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -327,7 +393,7 @@ void Fhs::remove_config_file(std::string const &name, std::string const &package
 	assert(initialized != UNINITIALIZED);
 	std::filesystem::remove(read_config_names(name, packagename, false, false).front());
 } // }}}
-void Fhs::remove_config_dir(std::string const &name, std::string const &packagename) { // {{{
+void remove_config_dir(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a config file.  Use the same parameters as were used to create it with write_config_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -344,39 +410,42 @@ void Fhs::remove_config_dir(std::string const &name, std::string const &packagen
 static void help_text() { // {{{
 	if (_info.help.empty()) {
 		if (_info.version.empty())
-			std::cerr << "this is " << Fhs::pname;
+			std::cerr << "this is " << pname;
 		else
-			std::cerr << "this is " << Fhs::pname << " version " << _info.version;
+			std::cerr << "this is " << pname << " version " << _info.version;
 	}
 	else
 		std::cerr << _info.help;
 
 	std::cerr << "\n\nSupported option arguments:\n";
 	for (int module_help = 0; module_help < 2; ++module_help) {
-		for (auto option: Fhs::OptionBase::all_options) {
-			if (option->args.module_name.empty() != bool(module_help))
+		for (auto option: OptionBase::all_options) {
+			// TODO: support module options.
+			if (module_help > 0)
 				continue;
+			//if (option->args.module_name.empty() != bool(module_help))
+			//	continue;
 			std::string m;
-			if (option->args.multiple)
+			if (option->multiple)
 				m += " (This option can be passed multiple times)";
 			std::string optname = std::string("--") + option->name;
 			if (!option->can_have_parameter) {
-				if (option->args.shortopt)
-					optname += std::string(", -") + option->args.shortopt;
+				if (option->shortopt)
+					optname += std::string(", -") + option->shortopt;
 				std::cerr << "\t" << optname << "\n\t\t" << option->help << m << "\n";
 			}
 			else {
 				if (option->must_have_parameter) {
 					optname += "=<value>";
-					if (option->args.shortopt)
-						optname += std::string(", -") + option->args.shortopt + "<value>";
+					if (option->shortopt)
+						optname += std::string(", -") + option->shortopt + "<value>";
 				}
 				else {
 					optname += "[=<value>]";
-					if (option->args.shortopt)
-						optname += std::string(", -") + option->args.shortopt + "[<value>]";
+					if (option->shortopt)
+						optname += std::string(", -") + option->shortopt + "[<value>]";
 				}
-				std::cerr << "\t" << optname << "\n\t\t" << option->help << "\n\t\tDefault: " << option->print(Fhs::OptionBase::PRINT_DEFAULT) << m << "\n";
+				std::cerr << "\t" << optname << "\n\t\t" << option->help << "\n\t\tDefault: " << option->print(OptionBase::PRINT_DEFAULT) << m << "\n";
 			}
 		}
 	}
@@ -388,9 +457,9 @@ static void help_text() { // {{{
 
 static void version_text() { // {{{
 	if (_info.version.empty())
-		std::cerr << Fhs::pname << "\n";
+		std::cerr << pname << "\n";
 	else
-		std::cerr << Fhs::pname << " version " << _info.version << "\n";
+		std::cerr << pname << " version " << _info.version << "\n";
 	if (!_info.contact.empty())
 		std::cerr << "\nPlease send feedback and bug reports to " << _info.contact << "\n";
 /* TODO: Add module info.
@@ -403,8 +472,8 @@ static void version_text() { // {{{
 				*/
 } // }}}
 
-static void load_config(Fhs *self, std::string const &filename = std::string(), std::string const &packagename = std::string()) { // {{{
-	auto config = self->read_config_file(filename, packagename);
+static void load_config(std::string const &filename = std::string(), std::string const &packagename = std::string()) { // {{{
+	auto config = read_config_file(filename, packagename);
 	if (!config.is_open())
 		return;
 	while (true) {
@@ -427,8 +496,8 @@ static void load_config(Fhs *self, std::string const &filename = std::string(), 
 			rawvalue = cfg.substr(p + 1 - cfg.begin());
 			have_value = true;
 		}
-		Fhs::OptionBase *option = nullptr;
-		for (auto o: Fhs::OptionBase::all_options) {
+		OptionBase *option = nullptr;
+		for (auto o: OptionBase::all_options) {
 			if (key == o->name) {
 				option = o;
 				break;
@@ -455,11 +524,10 @@ static void load_config(Fhs *self, std::string const &filename = std::string(), 
 
 		option->parse(rawvalue);
 		option->is_default = false;
-		// TODO: handle multiple.
 	}
 } // }}}
 
-static void save_config(Fhs *self, std::string const &name = std::string(), std::string const &packagename = std::string()) { // {{{
+static void save_config(std::string const &name = std::string(), std::string const &packagename = std::string()) { // {{{
 	/**Save a dict as a configuration file.
 	Write the config dict to a file in the configuration directory.  The
 	file is named <packagename>.ini, unless overridden.
@@ -469,33 +537,29 @@ static void save_config(Fhs *self, std::string const &name = std::string(), std:
 	@param packagename: Override for the name of the package, to determine
 		the directory to save to.
 	*/
-	assert(Fhs::initialized != Fhs::UNINITIALIZED);
-	auto config = self->write_config_file(name, packagename);
-	for (auto o: Fhs::OptionBase::all_options) {
+	assert(initialized != UNINITIALIZED);
+	auto config = write_config_file(name, packagename);
+	for (auto o: OptionBase::all_options) {
 		// Don't store options that were not specified.
 		if (o->is_default)
 			continue;
 
-		// Option without argument.
-		if (!o->has_parameter)
-			config << o->name << "\n";
-		else
-			config << o->name << "=" << o->print(Fhs::OptionBase::PRINT_VALUE) << "\n";
+		config << o->print(OptionBase::PRINT_STORE);
 	}
 	config << std::flush;
 } // }}}
 // }}}
 
 /// Use short option if it wasn't used by any other option yet.
-static Fhs::OptArg maybe_short(char opt) {
-	for (auto o: Fhs::OptionBase::all_options) {
-		if (o->args.shortopt == opt)
-			return {};
+static char maybe_short(char opt) { // {{{
+	for (auto o: OptionBase::all_options) {
+		if (o->shortopt == opt)
+			return 0;
 	}
-	return {.shortopt = opt, .multiple = false, .module_name = {}};
-}
+	return opt;
+} // }}}
 
-Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename) { // {{{
+void init(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename) { // {{{
 	/**Initialize the module.
 	This function must be called before any other in this module (except
 	option definitions and module_init(), which must be called before this
@@ -613,7 +677,6 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 			(*option)->is_default = false;
 			if ((*option)->can_have_parameter) {
 				if (have_value) {
-					(*option)->has_parameter = true;
 					(*option)->parse(value);	// Handle "passed with parameter" event.
 				}
 				else {
@@ -625,7 +688,6 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 							have_error = true;
 							continue;
 						}
-						(*option)->has_parameter = true;
 						(*option)->parse(argv[a]);
 					}
 					else {
@@ -649,7 +711,7 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 			while (p < arg.size()) {
 				std::list <OptionBase *>::iterator option;
 				for (option = OptionBase::all_options.begin(); option != OptionBase::all_options.end(); ++option) {
-					if ((*option)->args.shortopt == arg[p])
+					if ((*option)->shortopt == arg[p])
 						break;
 				}
 				if (option == OptionBase::all_options.end()) {
@@ -661,7 +723,6 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 				(*option)->is_default = false;
 				if ((*option)->can_have_parameter) {
 					if (p + 1 < arg.size()) {
-						(*option)->has_parameter = true;
 						(*option)->parse(arg.substr(p + 1));	// Handle "passed with parameter" event.
 						// The rest of the option is used as parameter, so abort parsing short options.
 						break;
@@ -675,7 +736,6 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 								have_error = true;
 								break;
 							}
-							(*option)->has_parameter = true;
 							(*option)->parse(argv[a]);
 						}
 						else {
@@ -708,11 +768,11 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 		is_system = system_option->value;
 
 	if (saveconfig_option.value) {
-		save_config(this, configfile_option.value);
+		save_config(configfile_option.value);
 	}
 	else {
 		// Load configuration from config file(s).
-		load_config(this, configfile_option.value);
+		load_config(configfile_option.value);
 	}
 	// }}}
 
@@ -731,7 +791,7 @@ Fhs::Fhs(char **argv, std::string const &help, std::string const &version, std::
 }
 // }}}
 
-void Fhs::atinit(generic_cb target, void *data) { // {{{
+void atinit(generic_cb target, void *data) { // {{{
 	/// Register a function at init.
 	assert(initialized != INITIALIZED);
 	_atinit.push_back({target, data});
@@ -760,7 +820,7 @@ def module_info(module_name, desc, version, contact): // {{{
 
 // Runtime files. {{{
 /// XDG runtime directory.  Note that XDG does not specify a default for this.  This library uses /run as the default for system services.
-std::filesystem::path Fhs::XDG_RUNTIME_DIR
+std::filesystem::path XDG_RUNTIME_DIR
 	= []() -> std::filesystem::path {
 		char const *envname = std::getenv("XDG_RUNTIME_DIR");
 		if (envname)
@@ -768,7 +828,7 @@ std::filesystem::path Fhs::XDG_RUNTIME_DIR
 		return "";
 	}();
 
-std::filesystem::path Fhs::write_runtime_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_runtime_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a runtime file for writing.  The file is not truncated if it exists.
 	@param name: Name of the runtime file.
 	@param create: Create directories.
@@ -778,15 +838,15 @@ std::filesystem::path Fhs::write_runtime_name(std::string const &name, bool crea
 	*/
 	return write_name(XDG_RUNTIME_DIR, "/run", ".txt", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_runtime_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_runtime_file(std::string const &name, std::string const &packagename) { // {{{
 	std::filesystem::path filename = write_runtime_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_runtime_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_runtime_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	return write_runtime_name(name, create, packagename, true);
 } // }}}
 
-std::list <std::filesystem::path> Fhs::read_runtime_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
+std::list <std::filesystem::path> read_runtime_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
 	/**Open a runtime file for reading.  The paramers should be identical to what was used to create the file with write_runtime().
 	@param name: Name of the runtime file.
 	@param dir: Return a directory name if true, a file or filename if false (the default).
@@ -796,17 +856,17 @@ std::list <std::filesystem::path> Fhs::read_runtime_names(std::string const &nam
 	*/
 	return read_names(XDG_RUNTIME_DIR, {"/run"}, {}, ".txt", name, packagename, dir, multiple);
 } // }}}
-std::ifstream Fhs::read_runtime_file(std::string const &name, std::string const &packagename) { // {{{
+std::ifstream read_runtime_file(std::string const &name, std::string const &packagename) { // {{{
 	auto names = read_runtime_names(name, packagename, false, false);
 	if (names.empty())
 		return std::ifstream();
 	return std::ifstream(names.front(), read_mode);
 } // }}}
-std::filesystem::path Fhs::read_runtime_dir(std::string const &name, std::string const &packagename) { // {{{
+std::filesystem::path read_runtime_dir(std::string const &name, std::string const &packagename) { // {{{
 	return read_runtime_names(name, packagename, true, false).front();
 } // }}}
 
-void Fhs::remove_runtime_file(std::string const &name, std::string const &packagename) { // {{{
+void remove_runtime_file(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a runtime file.  Use the same parameters as were used to create it with write_runtime_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -816,7 +876,7 @@ void Fhs::remove_runtime_file(std::string const &name, std::string const &packag
 	assert(initialized != UNINITIALIZED);
 	std::filesystem::remove(read_runtime_names(name, packagename, false, false).front());
 } // }}}
-void Fhs::remove_runtime_dir(std::string const &name, std::string const &packagename) { // {{{
+void remove_runtime_dir(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a runtime file.  Use the same parameters as were used to create it with write_runtime_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -830,7 +890,7 @@ void Fhs::remove_runtime_dir(std::string const &name, std::string const &package
 
 // Data files. {{{
 /// XDG data directory.
-std::filesystem::path Fhs::XDG_DATA_HOME
+std::filesystem::path XDG_DATA_HOME
 	= []() -> std::filesystem::path {
 		char const *envname = std::getenv("XDG_DATA_HOME");
 		if (envname)
@@ -838,9 +898,9 @@ std::filesystem::path Fhs::XDG_DATA_HOME
 		return HOME / ".local" / "share";
 	}();
 /// XDG data directory search path.
-std::list <std::filesystem::path> Fhs::XDG_DATA_DIRS;
+std::list <std::filesystem::path> XDG_DATA_DIRS;
 
-std::filesystem::path Fhs::write_data_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_data_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a data file for writing.  The file is not truncated if it exists.
 	@param name: Name of the data file.
 	@param create: Create directories.
@@ -850,15 +910,15 @@ std::filesystem::path Fhs::write_data_name(std::string const &name, bool create,
 	*/
 	return write_name(XDG_DATA_HOME, is_game ? "/var/games" : "/var/lib", ".dat", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_data_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_data_file(std::string const &name, std::string const &packagename) { // {{{
 	std::filesystem::path filename = write_data_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_data_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_data_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	return write_data_name(name, create, packagename, true);
 } // }}}
 
-std::list <std::filesystem::path> Fhs::read_data_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
+std::list <std::filesystem::path> read_data_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
 	/**Open a data file for reading.  The paramers should be identical to what was used to create the file with write_data().
 	@param name: Name of the data file.
 	@param dir: Return a directory name if true, a file or filename if false (the default).
@@ -871,17 +931,17 @@ std::list <std::filesystem::path> Fhs::read_data_names(std::string const &name, 
 			std::list <std::filesystem::path> {"/var/local/lib", "/var/lib", "/usr/local/lib", "/usr/lib", "/usr/local/share", "/usr/share"},
 		XDG_DATA_DIRS, ".cfg", name, packagename, dir, multiple);
 } // }}}
-std::ifstream Fhs::read_data_file(std::string const &name, std::string const &packagename) { // {{{
+std::ifstream read_data_file(std::string const &name, std::string const &packagename) { // {{{
 	auto names = read_data_names(name, packagename, false, false);
 	if (names.empty())
 		return std::ifstream();
 	return std::ifstream(names.front(), read_mode);
 } // }}}
-std::filesystem::path Fhs::read_data_dir(std::string const &name, std::string const &packagename) { // {{{
+std::filesystem::path read_data_dir(std::string const &name, std::string const &packagename) { // {{{
 	return read_data_names(name, packagename, true, false).front();
 } // }}}
 
-void Fhs::remove_data_file(std::string const &name, std::string const &packagename) { // {{{
+void remove_data_file(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a data file.  Use the same parameters as were used to create it with write_data_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -891,7 +951,7 @@ void Fhs::remove_data_file(std::string const &name, std::string const &packagena
 	assert(initialized != UNINITIALIZED);
 	std::filesystem::remove(read_data_names(name, packagename, false, false).front());
 } // }}}
-void Fhs::remove_data_dir(std::string const &name, std::string const &packagename) { // {{{
+void remove_data_dir(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a data file.  Use the same parameters as were used to create it with write_data_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -905,7 +965,7 @@ void Fhs::remove_data_dir(std::string const &name, std::string const &packagenam
 
 // Cache files. {{{
 /// XDG cache directory.
-std::filesystem::path Fhs::XDG_CACHE_HOME
+std::filesystem::path XDG_CACHE_HOME
 	= []() -> std::filesystem::path {
 		char const *envname = std::getenv("XDG_CACHE_HOME");
 		if (envname)
@@ -913,7 +973,7 @@ std::filesystem::path Fhs::XDG_CACHE_HOME
 		return HOME / ".cache";
 	}();
 
-std::filesystem::path Fhs::write_cache_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_cache_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a cache file for writing.  The file is not truncated if it exists.
 	@param name: Name of the cache file.
 	@param create: Create directories.
@@ -923,15 +983,15 @@ std::filesystem::path Fhs::write_cache_name(std::string const &name, bool create
 	*/
 	return write_name(XDG_CACHE_HOME, "/var/cache", ".txt", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_cache_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_cache_file(std::string const &name, std::string const &packagename) { // {{{
 	std::filesystem::path filename = write_cache_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_cache_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_cache_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	return write_cache_name(name, create, packagename, true);
 } // }}}
 
-std::list <std::filesystem::path> Fhs::read_cache_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
+std::list <std::filesystem::path> read_cache_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
 	/**Open a cache file for reading.  The paramers should be identical to what was used to create the file with write_cache().
 	@param name: Name of the cache file.
 	@param dir: Return a directory name if true, a file or filename if false (the default).
@@ -941,17 +1001,17 @@ std::list <std::filesystem::path> Fhs::read_cache_names(std::string const &name,
 	*/
 	return read_names(XDG_CACHE_HOME, {"/var/cache"}, {}, ".txt", name, packagename, dir, multiple);
 } // }}}
-std::ifstream Fhs::read_cache_file(std::string const &name, std::string const &packagename) { // {{{
+std::ifstream read_cache_file(std::string const &name, std::string const &packagename) { // {{{
 	auto names = read_cache_names(name, packagename, false, false);
 	if (names.empty())
 		return std::ifstream();
 	return std::ifstream(names.front(), read_mode);
 } // }}}
-std::filesystem::path Fhs::read_cache_dir(std::string const &name, std::string const &packagename) { // {{{
+std::filesystem::path read_cache_dir(std::string const &name, std::string const &packagename) { // {{{
 	return read_cache_names(name, packagename, true, false).front();
 } // }}}
 
-void Fhs::remove_cache_file(std::string const &name, std::string const &packagename) { // {{{
+void remove_cache_file(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a cache file.  Use the same parameters as were used to create it with write_cache_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -961,7 +1021,7 @@ void Fhs::remove_cache_file(std::string const &name, std::string const &packagen
 	assert(initialized != UNINITIALIZED);
 	std::filesystem::remove(read_cache_names(name, packagename, false, false).front());
 } // }}}
-void Fhs::remove_cache_dir(std::string const &name, std::string const &packagename) { // {{{
+void remove_cache_dir(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a cache file.  Use the same parameters as were used to create it with write_cache_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -974,7 +1034,7 @@ void Fhs::remove_cache_dir(std::string const &name, std::string const &packagena
 // }}}
 
 // Spool files. {{{
-std::filesystem::path Fhs::write_spool_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_spool_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a spool file for writing.  The file is not truncated if it exists.
 	@param name: Name of the spool file.
 	@param create: Create directories.
@@ -984,15 +1044,15 @@ std::filesystem::path Fhs::write_spool_name(std::string const &name, bool create
 	*/
 	return write_name(XDG_CACHE_HOME, "/var/spool", ".txt", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_spool_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_spool_file(std::string const &name, std::string const &packagename) { // {{{
 	std::filesystem::path filename = write_spool_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_spool_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_spool_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	return write_spool_name(name, create, packagename, true);
 } // }}}
 
-std::list <std::filesystem::path> Fhs::read_spool_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
+std::list <std::filesystem::path> read_spool_names(std::string const &name, std::string const &packagename, bool dir, bool multiple) { // {{{
 	/**Open a spool file for reading.  The paramers should be identical to what was used to create the file with write_spool().
 	@param name: Name of the spool file.
 	@param dir: Return a directory name if true, a file or filename if false (the default).
@@ -1002,17 +1062,17 @@ std::list <std::filesystem::path> Fhs::read_spool_names(std::string const &name,
 	*/
 	return read_names(XDG_CACHE_HOME, {"/var/spool"}, {}, ".txt", name, packagename, dir, multiple);
 } // }}}
-std::ifstream Fhs::read_spool_file(std::string const &name, std::string const &packagename) { // {{{
+std::ifstream read_spool_file(std::string const &name, std::string const &packagename) { // {{{
 	auto names = read_spool_names(name, packagename, false, false);
 	if (names.empty())
 		return std::ifstream();
 	return std::ifstream(names.front(), read_mode);
 } // }}}
-std::filesystem::path Fhs::read_spool_dir(std::string const &name, std::string const &packagename) { // {{{
+std::filesystem::path read_spool_dir(std::string const &name, std::string const &packagename) { // {{{
 	return read_spool_names(name, packagename, true, false).front();
 } // }}}
 
-void Fhs::remove_spool_file(std::string const &name, std::string const &packagename) { // {{{
+void remove_spool_file(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a spool file.  Use the same parameters as were used to create it with write_spool_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -1022,7 +1082,7 @@ void Fhs::remove_spool_file(std::string const &name, std::string const &packagen
 	assert(initialized != UNINITIALIZED);
 	std::filesystem::remove(read_spool_names(name, packagename, false, false).front());
 } // }}}
-void Fhs::remove_spool_dir(std::string const &name, std::string const &packagename) { // {{{
+void remove_spool_dir(std::string const &name, std::string const &packagename) { // {{{
 	/**Remove a spool file.  Use the same parameters as were used to create it with write_spool_file().
 	@param name: The file to remove.
 	@param dir: If true, remove a directory.  If false (the default), remove a file.
@@ -1035,7 +1095,7 @@ void Fhs::remove_spool_dir(std::string const &name, std::string const &packagena
 // }}}
 
 // Log files. {{{
-std::filesystem::path Fhs::write_log_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
+std::filesystem::path write_log_name(std::string const &name, bool create, std::string const &packagename, bool dir) { // {{{
 	/**Open a log file for writing.  The file is not truncated if it exists.
 	@param name: Name of the log file.
 	@param create: Create directories.
@@ -1045,12 +1105,12 @@ std::filesystem::path Fhs::write_log_name(std::string const &name, bool create, 
 	*/
 	return write_name(std::filesystem::path(), "/var/log", ".txt", name, create, packagename, dir);
 } // }}}
-std::ofstream Fhs::write_log_file(std::string const &name, std::string const &packagename) { // {{{
+std::ofstream write_log_file(std::string const &name, std::string const &packagename) { // {{{
 	assert(is_system);
 	std::filesystem::path filename = write_log_name(name, true, packagename, false);
 	return std::ofstream(filename, write_mode);
 } // }}}
-std::filesystem::path Fhs::write_log_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
+std::filesystem::path write_log_dir(std::string const &name, bool create, std::string const &packagename) { // {{{
 	assert(is_system);
 	return write_log_name(name, create, packagename, true);
 } // }}}
@@ -1062,7 +1122,7 @@ static std::filesystem::path get_temp_name(std::string const &name) { // {{{
 	if (_temp_file_dir == std::filesystem::path()) {
 		assert(temp_file_counter == 0);
 		// Don't allow packagename override, because this is not only for current call.
-		std::string fullname = std::filesystem::temp_directory_path() / Fhs::pname;
+		std::string fullname = std::filesystem::temp_directory_path() / pname;
 		size_t size = fullname.size();
 		char tpl[size + 8];
 		memcpy(tpl, fullname.data(), size);
@@ -1078,34 +1138,15 @@ static std::filesystem::path get_temp_name(std::string const &name) { // {{{
 	return _temp_file_dir / n.str();
 } // }}}
 
-std::ofstream Fhs::write_temp_file(std::string const &name) { // {{{
+std::ofstream write_temp_file(std::string const &name) { // {{{
 	return std::ofstream(get_temp_name(name), std::ios::in | std::ios::out | std::ios::trunc | std::ios::noreplace | std::ios::binary);
 } // }}}
 
-std::filesystem::path Fhs::write_temp_dir(std::string const &name) { // {{{
+std::filesystem::path write_temp_dir(std::string const &name) { // {{{
 	std::filesystem::path filename = get_temp_name(name);
 	std::filesystem::create_directory(filename);
 	return filename;
 } // }}}
 // }}}
 
-// XXX
-
-#if 0
-
-// Locks. {{{
-def lock(name = None, info = '', packagename = None):
-	/**Acquire a lock.
-	@todo locks are currently not implemented.
-	*/
-	assert(initialized != UNINITIALIZED);
-	// TODO
-
-def unlock(name = None, packagename = None):
-	/**Release a lock.
-	@todo locks are currently not implemented.
-	*/
-	assert(initialized != UNINITIALIZED);
-	// TODO
-// }}}
-#endif
+}

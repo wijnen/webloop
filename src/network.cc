@@ -1,5 +1,3 @@
-// vim: set fileencoding=utf-8 foldmethod=marker :
-
 /* {{{ Copyright 2013-2023 Bas Wijnen <wijnen@debian.org>
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as
@@ -35,8 +33,11 @@ sockets.  Connection targets can be specified in several ways.
 // }}}
 
 #include <cassert>
+#include <fcntl.h>
 #include "webobject.hh"
 #include "network.hh"
+
+namespace Webloop {
 
 /* {{{ Interface description
 // - connection setup
@@ -53,6 +54,7 @@ sockets.  Connection targets can be specified in several ways.
 // }}} */
 
 // Network sockets. {{{
+// Read internals. {{{
 bool SocketBase::rawread_impl() { // {{{
 	STARTFUNC;
 	if (!rawread_cb)
@@ -68,7 +70,7 @@ bool SocketBase::read_impl() { // {{{
 	else
 		buffer += recv();
 	if (DEBUG > 3)
-		log("new data; buffer:" + WebString(buffer).dump());
+		WL_log("new data; buffer:" + WebString(buffer).dump());
 	if (!read_cb)
 		return false;
 	(user->*read_cb)(buffer);
@@ -128,6 +130,43 @@ void SocketBase::finish_move(SocketBase &&other) { // {{{
 	}
 } // }}}
 
+std::string SocketBase::recv() { // {{{
+	STARTFUNC;
+	/* Read data from the network.
+	Data is read from the network.  If the socket is not set to
+	non-blocking, this call will block if there is no data.  It
+	will return a short read if limited data is available.  The
+	read data is returned as a bytes object.  If TLS is enabled,
+	more than maxsize bytes may be returned.  On EOF, the socket is
+	closed and if disconnect_cb is not set, an EOFError is raised.
+	@param maxsize: passed to the underlaying recv call.  If TLS is
+		enabled, no data is left pending, which means that more
+		than maxsize bytes can be returned.
+	@return The received data as a bytes object.
+	*/
+	if (fd < 0) {
+		WL_log("recv on closed socket");
+		throw "recv on closed socket";
+	}
+	char buffer[maxsize];
+	auto num = ::read(fd, buffer, maxsize);
+	if (num < 0) {
+		WL_log("Error reading from socket");
+		return close();
+	}
+	if (num == 0) {
+		bool have_server = server;
+		std::string ret = close();
+		std::cerr << "closed" << std::endl;
+		if (!disconnect_cb && !have_server)
+			throw "network connection closed";
+		return ret;
+	}
+	return std::string(buffer, num);
+} // }}}
+// }}}
+
+// Constructor- and destructor-related. {{{
 SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
 		fd(new_fd),
 		maxsize(4096),
@@ -157,7 +196,7 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 	if (fd >= 0)
 		return;
 
-	log("connecting to " + url.print());
+	WL_log("connecting to " + url.print());
 
 	if (url.unix.empty() && url.service.empty()) {
 		url.service = std::move(url.host);
@@ -170,7 +209,7 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 		fd = socket(AF_UNIX, SOCK_STREAM, 0);
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, url.unix.c_str(), sizeof(addr.sun_path));
+		strncpy(addr.sun_path, url.unix.c_str(), sizeof(addr.sun_path) - 1);
 		connect(fd, reinterpret_cast <sockaddr *>(&addr), sizeof(addr));
 	}
 	else {
@@ -189,7 +228,7 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 		fd = -1;
 		for (auto rp = addr; rp; rp = rp->ai_next) {
 			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-			log("attempt to connect; fd = " + std::to_string(fd));
+			WL_log("attempt to connect; fd = " + std::to_string(fd));
 			if (fd < 0) {
 				std::cerr << "unable to open socket: " << strerror(errno) << std::endl;
 				continue;
@@ -209,6 +248,11 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 			std::cerr << "unable to connect any socket" << std::endl;
 			throw "unable to connect any socket";
 		}
+	}
+	int flags = fcntl(fd, F_GETFL);
+	if (flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+		std::cerr << "unable to set socket to nonblocking: " << strerror(errno) << std::endl;
+		throw "unable to set socket to nonblocking";
 	}
 } // }}}
 
@@ -270,6 +314,7 @@ std::string SocketBase::close() { // {{{
 		(user->*disconnect_cb)();
 	return pending;
 } // }}}
+// }}}
 
 void SocketBase::send(std::string const &data) { // {{{
 	STARTFUNC;
@@ -281,7 +326,7 @@ void SocketBase::send(std::string const &data) { // {{{
 	if (fd < 0)
 		return;
 	if (DEBUG > 3)
-		log("Sending: " + WebString(data).dump());
+		WL_log("Sending: " + WebString(data).dump());
 	size_t p = 0;
 	while (p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);
@@ -293,50 +338,7 @@ void SocketBase::send(std::string const &data) { // {{{
 	}
 } // }}}
 
-void SocketBase::sendline(std::string const &data) { // {{{
-	STARTFUNC;
-	// Send a line of text.
-	// Identical to send(), but data is a str and a newline is added.
-	// @param data: line to send.  A newline is added.  This should be
-	//	 of type str.  The data is sent as utf-8.
-	send(data + "\n");
-} // }}}
-
-std::string SocketBase::recv() { // {{{
-	STARTFUNC;
-	/* Read data from the network.
-	Data is read from the network.  If the socket is not set to
-	non-blocking, this call will block if there is no data.  It
-	will return a short read if limited data is available.  The
-	read data is returned as a bytes object.  If TLS is enabled,
-	more than maxsize bytes may be returned.  On EOF, the socket is
-	closed and if disconnect_cb is not set, an EOFError is raised.
-	@param maxsize: passed to the underlaying recv call.  If TLS is
-		enabled, no data is left pending, which means that more
-		than maxsize bytes can be returned.
-	@return The received data as a bytes object.
-	*/
-	if (fd < 0) {
-		log("recv on closed socket");
-		throw "recv on closed socket";
-	}
-	char buffer[maxsize];
-	auto num = ::read(fd, buffer, maxsize);
-	if (num < 0) {
-		log("Error reading from socket");
-		return close();
-	}
-	if (num == 0) {
-		bool have_server = server;
-		std::string ret = close();
-		std::cerr << "closed" << std::endl;
-		if (!disconnect_cb && !have_server)
-			throw "network connection closed";
-		return ret;
-	}
-	return std::string(buffer, num);
-} // }}}
-
+// Reading. {{{
 std::string SocketBase::rawread_base(RawReadType callback) { // {{{
 	STARTFUNC;
 	/* Register function to be called when data is ready for reading.
@@ -370,7 +372,7 @@ void SocketBase::read_base(ReadType callback) { // {{{
 	@return None.
 	*/
 	if (DEBUG > 4)
-		log("fd:" + std::to_string(fd));
+		WL_log("fd:" + std::to_string(fd));
 	if (fd < 0)
 		return;
 	std::string first = unread();
@@ -426,6 +428,7 @@ std::string SocketBase::unread() { // {{{
 	return ret;
 } // }}}
 // }}}
+// }}}
 
 // Network server. {{{
 void ServerBase::remote_disconnect(std::list <SocketBase *>::iterator socket) { // {{{
@@ -447,50 +450,58 @@ void ServerBase::open_socket(std::string const &service, int backlog) { // {{{
 		}
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, service.c_str(), sizeof(addr.sun_path));
+		strncpy(addr.sun_path, service.c_str(), sizeof(addr.sun_path) - 1);
 		if (bind(fd, reinterpret_cast <sockaddr const *>(&addr), sizeof(addr)) < 0) {
 			std::cerr << "unable to bind unix socket: " << strerror(errno) << std::endl;
 			throw "unable to open socket";
 		}
 		listeners.emplace_back(this, fd);
-		return;
 	}
-	struct addrinfo addr_hint;
-	addr_hint.ai_family = AF_UNSPEC;
-	addr_hint.ai_socktype = SOCK_STREAM;
-	addr_hint.ai_protocol = IPPROTO_TCP;
-	addr_hint.ai_flags = AI_PASSIVE | AI_V4MAPPED | AI_ADDRCONFIG;
-	struct addrinfo *addr;
-	int code = getaddrinfo(nullptr, service.c_str(), &addr_hint, &addr);
-	if (code != 0) {
-		std::cerr << "unable to open socket: " << gai_strerror(code) << std::endl;
-		throw "unable to open socket";
+	else {
+		struct addrinfo addr_hint;
+		addr_hint.ai_family = AF_UNSPEC;
+		addr_hint.ai_socktype = SOCK_STREAM;
+		addr_hint.ai_protocol = IPPROTO_TCP;
+		addr_hint.ai_flags = AI_PASSIVE | AI_V4MAPPED | AI_ADDRCONFIG;
+		struct addrinfo *addr;
+		int code = getaddrinfo(nullptr, service.c_str(), &addr_hint, &addr);
+		if (code != 0) {
+			std::cerr << "unable to open socket: " << gai_strerror(code) << std::endl;
+			throw "unable to open socket";
+		}
+		for (auto rp = addr; rp; rp = rp->ai_next) {
+			int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+			if (fd < 0) {
+				std::cerr << "unable to create socket: " << strerror(errno) << std::endl;
+				continue;
+			}
+			int t = 1;
+			setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t));
+			if (bind(fd, rp->ai_addr, rp->ai_addrlen) < 0) {
+				if (listeners.empty() || errno != EADDRINUSE)
+					std::cerr << "unable to bind: " << strerror(errno) << std::endl;
+				::close(fd);
+				continue;
+			}
+			if (listen(fd, backlog) < 0) {
+				std::cerr << "unable to listen: " << strerror(errno) << std::endl;
+				::close(fd);
+				continue;
+			}
+			listeners.emplace_back(this, fd);
+		}
+		freeaddrinfo(addr);
+		if (listeners.empty()) {
+			std::cerr << "unable to bind socket" << std::endl;
+			throw "unable to bind socket";
+		}
 	}
-	for (auto rp = addr; rp; rp = rp->ai_next) {
-		int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-		if (fd < 0) {
-			std::cerr << "unable to create socket: " << strerror(errno) << std::endl;
-			continue;
+	for (auto &s: listeners) {
+		int flags = fcntl(s.fd, F_GETFL);
+		if (flags == -1 || fcntl(s.fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+			std::cerr << "unable to set socket to nonblocking: " << strerror(errno) << std::endl;
+			throw "unable to set socket to nonblocking";
 		}
-		int t = 1;
-		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t));
-		if (bind(fd, rp->ai_addr, rp->ai_addrlen) < 0) {
-			if (listeners.empty() || errno != EADDRINUSE)
-				std::cerr << "unable to bind: " << strerror(errno) << std::endl;
-			::close(fd);
-			continue;
-		}
-		if (listen(fd, backlog) < 0) {
-			std::cerr << "unable to listen: " << strerror(errno) << std::endl;
-			::close(fd);
-			continue;
-		}
-		listeners.emplace_back(this, fd);
-	}
-	freeaddrinfo(addr);
-	if (listeners.empty()) {
-		std::cerr << "unable to bind socket" << std::endl;
-		throw "unable to bind socket";
 	}
 } // }}}
 
@@ -586,3 +597,7 @@ void ServerBase::close() { // {{{
 	}
 } // }}}
 // }}}
+
+}
+
+// vim: set fileencoding=utf-8 foldmethod=marker :

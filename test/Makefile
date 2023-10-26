@@ -1,4 +1,4 @@
-TARGETS = test-httpd test-fhs test-network test-network-server test-rpc
+TARGETS = test-httpd test-fhs test-network test-network-server test-rpc test-rpcd test-codes
 PARTS = websocketd coroutine fhs network webobject url tools loop
 
 HEADERS = $(addprefix ../include/,$(addsuffix .hh,${PARTS}))

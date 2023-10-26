@@ -1,0 +1,4 @@
+debian/tmp/usr/lib/*/libwebloop.so
+debian/tmp/usr/lib/*/libwebloop.a
+debian/tmp/usr/lib/*/pkgconfig/webloop.pc
+debian/tmp/usr/include/webloop/*.hh

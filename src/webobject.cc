@@ -1,7 +1,28 @@
 #include "webobject.hh"
 #include "network.hh"
+#include <cmath>
+
+namespace Webloop {
 
 std::shared_ptr <WebNone> WebNone::instance;
+
+std::string WebFloat::dump() const { // {{{
+#ifdef WEBOBJECT_DUMPS_JSON
+	if (std::isnan(value))
+		return "NaN";
+	if (std::isinf(value)) {
+		if (value < 0)
+			return "-Infinity";
+		return "Infinity";
+	}
+	return std::to_string(value);
+#else
+	ieee754_double v = {.d = value};
+	uint64_t mantissa = htole64((uint64_t(v.ieee.mantissa1) << 20) | v.ieee.mantissa0);
+	uint16_t exponent = htole16(v.ieee.exponent | (v.ieee.negative ? (1 << 14) : 0));
+	return "F" + std::string(reinterpret_cast <char const *>(&mantissa), sizeof(uint64_t)) + std::string(reinterpret_cast <char const *>(&exponent), sizeof(uint16_t));
+#endif
+} // }}}
 
 std::string WebString::dump() const { // {{{
 #ifdef WEBOBJECT_DUMPS_JSON
@@ -84,16 +105,16 @@ std::string WebMap::print() const { // {{{
 } // }}}
 
 #ifdef WEBOBJECT_DUMPS_JSON
-static int parse_digit(char d) {
+static int parse_digit(char d) { // {{{
 	if (d >= '0' && d <= '9')
 		return d - '0';
 	if (d >= 'a' && d <= 'f')
 		return d - 'a' + 10;
-	log("invalid hex digit " + std::string(&d, 1));
+	WL_log("invalid hex digit " + std::string(&d, 1));
 	return 0;
-}
+} // }}}
 
-static std::string read_string(std::string const &data, std::string::size_type &pos) {
+static std::string read_string(std::string const &data, std::string::size_type &pos) { // {{{
 	// Read a string.
 	// Pos is updated to position after final '"'.
 	// data[pos] must initially be '"'.
@@ -102,7 +123,7 @@ static std::string read_string(std::string const &data, std::string::size_type &
 	while (true) {
 		auto p = data.find_first_of("\\\"", pos);
 		if (p == std::string::npos) {
-			log("unfinished string");
+			WL_log("unfinished string");
 			ret += data.substr(pos);
 			pos = std::string::npos;
 			return ret;
@@ -118,7 +139,7 @@ static std::string read_string(std::string const &data, std::string::size_type &
 		assert(data[pos] == '\\');
 		++pos;
 		if (pos >= data.size()) {
-			log("unfinished string");
+			WL_log("unfinished string");
 			pos = std::string::npos;
 			return ret;
 		}
@@ -148,7 +169,7 @@ static std::string read_string(std::string const &data, std::string::size_type &
 		case 'x':
 		{
 			if (pos + 3 >= data.size()) {
-				log("unfinished string");
+				WL_log("unfinished string");
 				ret += "x";
 			}
 			else {
@@ -160,25 +181,41 @@ static std::string read_string(std::string const &data, std::string::size_type &
 			break;
 		}
 		default:
-			log("unrecognized escape sequence in JSON string: " + data.substr(pos - 1, 2));
+			WL_log("unrecognized escape sequence in JSON string: " + data.substr(pos - 1, 2));
 			ret += data[pos];
 			break;
 		}
 		++pos;
 	}
-}
+} // }}}
 
-static std::shared_ptr <WebObject> load_item(std::string const &data, std::string::size_type &pos) {
+static std::shared_ptr <WebObject> load_item(std::string const &data, std::string::size_type &pos) { // {{{
 	pos = data.find_first_not_of(" \t\n\r\v\f", pos);
 	if (pos == std::string::npos)
 		return WebNone::create();
+	if (startswith(data, "null", pos)) {
+		pos += 4;
+		return WebNone::create();
+	}
+	if (startswith(data, "NaN", pos)) {
+		pos += 3;
+		return WebFloat::create(NAN);
+	}
+	if (startswith(data, "-Infinity", pos)) {
+		pos += 9;
+		return WebFloat::create(-INFINITY);
+	}
+	if (startswith(data, "Infinity", pos)) {
+		pos += 8;
+		return WebFloat::create(INFINITY);
+	}
 	switch(data[pos]) {
 	case '[': // vector
 	{
 		auto vector = WebVector::create();
 		pos = data.find_first_not_of(" \t\n\r\v\f", pos + 1);
 		if (pos == std::string::npos) {
-			log("incomplete vector");
+			WL_log("incomplete vector");
 			return vector;
 		}
 		if (data[pos] == ']') {
@@ -189,13 +226,13 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 			auto item = load_item(data, pos);
 			vector->push_back(item);
 			if (pos == std::string::npos || pos >= data.size()) {
-				log("incomplete vector");
+				WL_log("incomplete vector");
 				pos = std::string::npos;
 				return vector;
 			}
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos);
 			if (pos == std::string::npos) {
-				log("incomplete vector");
+				WL_log("incomplete vector");
 				return vector;
 			}
 			if (data[pos] == ']') {
@@ -203,10 +240,10 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 				return vector;
 			}
 			if (data[pos] != ',')
-				log("expected ',' after vector item");
+				WL_log("expected ',' after vector item");
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos + 1);
 			if (pos == std::string::npos) {
-				log("incomplete vector");
+				WL_log("incomplete vector");
 				return vector;
 			}
 		}
@@ -216,7 +253,7 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 		auto map = WebMap::create();
 		pos = data.find_first_not_of(" \t\n\r\v\f", pos + 1);
 		if (pos == std::string::npos) {
-			log("incomplete map");
+			WL_log("incomplete map");
 			return map;
 		}
 		if (data[pos] == '}') {
@@ -225,25 +262,25 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 		}
 		while (true) {
 			if (data[pos] != '"')
-				log("no string as map key");
+				WL_log("no string as map key");
 			std::string key = read_string(data, pos);
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos);
 			if (pos == std::string::npos) {
-				log("incomplete map");
+				WL_log("incomplete map");
 				return map;
 			}
 			if (data[pos] != ':')
-				log("':' expected after map key");
+				WL_log("':' expected after map key");
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos + 1);
 			if (pos == std::string::npos) {
-				log("incomplete map");
+				WL_log("incomplete map");
 				return map;
 			}
 			auto item = load_item(data, pos);
 			(*map)[key] = item;
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos);
 			if (pos == std::string::npos) {
-				log("incomplete map");
+				WL_log("incomplete map");
 				return map;
 			}
 			if (data[pos] == '}') {
@@ -251,10 +288,10 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 				return map;
 			}
 			if (data[pos] != ',')
-				log("expected ',' after map item");
+				WL_log("expected ',' after map item");
 			pos = data.find_first_not_of(" \t\n\r\v\f", pos + 1);
 			if (pos == std::string::npos) {
-				log("incomplete map");
+				WL_log("incomplete map");
 				return map;
 			}
 		}
@@ -273,7 +310,7 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 			std::istringstream s(data.substr(pos, pi - pos));
 			s >> i;
 			if (std::string::size_type(s.tellg()) < pi)
-				log("junk in JSON int");
+				WL_log("junk in JSON int");
 			pos = pi;
 			return WebInt::create(i);
 		}
@@ -283,13 +320,13 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 			std::istringstream s(data.substr(pos, pf - pos));
 			s >> f;
 			if (std::string::size_type(s.tellg()) < pf)
-				log("junk in JSON int");
+				WL_log("junk in JSON int");
 			pos = pf;
 			return WebFloat::create(f);
 		}
 	}
 	}
-}
+} // }}}
 
 std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 	assert(!data.empty());
@@ -382,5 +419,7 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 	return std::shared_ptr <WebObject> (ret);
 } // }}}
 #endif
+
+}
 
 // vim: set foldmethod=marker :

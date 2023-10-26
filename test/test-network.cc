@@ -15,7 +15,7 @@ bool icb(void *data) {
 */
 
 class Remote {
-	Socket <Remote> remote, local;
+	Webloop::Socket <Remote> remote, local;
 public:
 	Remote(std::string const &raddr, int laddr) :
 		remote(raddr, this),
@@ -28,12 +28,12 @@ public:
 	void readcb(std::string &buffer) {
 		std::cerr << "\"" << buffer << "\"" << std::endl;
 		if (buffer == "exit\n")
-			Loop::get()->stop();
+			Webloop::Loop::get()->stop();
 		buffer.clear();
 	}
 	void disconnect() {
-		log("disconnect");
-		Loop::get()->stop();
+		WL_log("disconnect");
+		Webloop::Loop::get()->stop();
 	}
 	void stdin_cb(std::string const &line) {
 		remote.send(line + "\n");
@@ -43,7 +43,7 @@ public:
 int main() {
 	Remote sockets("http://localhost:8567/foo?bar#baz", STDIN_FILENO);
 	try {
-		Loop::get()->run();
+		Webloop::Loop::get()->run();
 	}
 	catch (char const *msg) {
 		std::cerr << "error: " << msg << std::endl;

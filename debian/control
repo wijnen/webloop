@@ -1,0 +1,36 @@
+Source: libwebloop
+Section: libs
+Priority: optional
+Maintainer: Bas Wijnen <wijnen@debian.org>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.6.2
+
+Package: libwebloop0
+Architecture: any
+Multi-Arch: same
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: library for writing web-based multi-user programs
+ This library contains several parts which make it easier to write a program
+ with a multi-user interface through a web browser:
+   - Fhs tools for accessing files in standard locations.
+   - Coroutine, url, webobject and other tools.
+   - Network sockets with an easy interface.
+   - Websocket (client and) server for communicating with users.
+ .
+ This package contains the library that is used to run programs that use it.
+
+Package: libwebloop-dev
+Architecture: any
+Multi-Arch: same
+Section: libdevel
+Depends: ${misc:Depends}, libwebloop0 (=${binary:Version})
+Description: library for writing web-based multi-user programs
+ This library contains several parts which make it easier to write a program
+ with a multi-user interface through a web browser:
+   - Fhs tools for accessing files in standard locations.
+   - Coroutine, url, webobject and other tools.
+   - Network sockets with an easy interface.
+   - Websocket (client and) server for communicating with users.
+ .
+ This package contains the development files, needed to compile programs with
+ this library.

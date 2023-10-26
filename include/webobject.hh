@@ -16,6 +16,8 @@
 #include "tools.hh"
 // }}}
 
+namespace Webloop {
+
 #define WEBOBJECT_DUMPS_JSON
 
 class WebNone;
@@ -115,17 +117,7 @@ class WebFloat : public WebObject { // {{{
 	void load_impl(std::string const &data) override;
 #endif
 public:
-#ifdef WEBOBJECT_DUMPS_JSON
-	// TODO: Handle inf and nan.
-	std::string dump() const override { return (std::ostringstream() << value).str(); }
-#else
-	std::string dump() const override {
-		ieee754_double v = {.d = value};
-		uint64_t mantissa = htole64((uint64_t(v.ieee.mantissa1) << 20) | v.ieee.mantissa0);
-		uint16_t exponent = htole16(v.ieee.exponent | (v.ieee.negative ? (1 << 14) : 0));
-		return "F" + std::string(reinterpret_cast <char const *>(&mantissa), sizeof(uint64_t)) + std::string(reinterpret_cast <char const *>(&exponent), sizeof(uint16_t));
-	}
-#endif
+	std::string dump() const override;
 	std::string print() const override { return (std::ostringstream() << value).str(); }
 	WebFloat() : WebObject(FLOAT), value() {}
 	WebFloat(FloatType value) : WebObject(FLOAT), value(value) {}
@@ -175,6 +167,7 @@ public:
 	size_t size() const { return value.size(); }
 	void push_back(std::shared_ptr <WebObject> item) { value.push_back(item); }
 	void pop_back() { value.pop_back(); }
+	void insert(size_t position, std::shared_ptr <WebObject> item) { value.insert(value.begin() + position, item); }
 }; // }}}
 
 class WebMap : public WebObject { // {{{
@@ -195,6 +188,8 @@ public:
 	std::shared_ptr <WebObject> const &operator[](std::string const &key) const { STARTFUNC; return value.at(key); }
 	~WebMap() override { STARTFUNC; value.clear(); }
 }; // }}}
+
+}
 
 #endif
 

@@ -56,6 +56,8 @@ sockets.  Connection targets can be specified in several ways.
 using namespace std::literals;
 // }}}
 
+namespace Webloop {
+
 /* {{{ Interface description
 // - connection setup
 //   - connect to server
@@ -150,15 +152,18 @@ public:
 	// Close the connection.
 	std::string close();
 
-	// Retrieve a string of data. TODO: The socket should be set to non-blocking, so this can be called when no data is waiting.
+	// Retrieve a string of data.
 	std::string recv();
 
-	// Write data. TODO: This is currently blocking; it should instead be possible as coroutine and with callback.
+	// Write data.
+	// TODO: Sending data on a socket is currently blocking; it should instead be possible as coroutine and with callback.
 	void send(std::string const &data);
-	void sendline(std::string const &data);
 
 	// Read event scheduling.
 	std::string unread();
+
+	// Check if socket is connected.
+	operator bool() const { return fd >= 0; }
 }; // }}}
 
 // Socket <UserType> {{{
@@ -187,11 +192,11 @@ public:
 
 	// Read event scheduling.
 	std::string rawread(RawReadCb callback) { STARTFUNC; return rawread_base(reinterpret_cast <RawReadType>(callback)); }
-	void read(ReadCb callback) { STARTFUNC; log("fd: " + std::to_string(get_fd())); read_base(reinterpret_cast <ReadType>(callback)); }
+	void read(ReadCb callback) { STARTFUNC; WL_log("fd: " + std::to_string(get_fd())); read_base(reinterpret_cast <ReadType>(callback)); }
 	void read_lines(ReadLinesCb callback) { STARTFUNC; read_lines_base(reinterpret_cast <ReadLinesType>(callback)); }
 	// Other events.
-	void set_error_cb(ErrorCb callback) { STARTFUNC; error_cb = reinterpret_cast <ErrorType>(callback); }
 	void set_disconnect_cb(DisconnectCb callback) { STARTFUNC; disconnect_cb = reinterpret_cast <DisconnectType>(callback); }
+	void set_error_cb(ErrorCb callback) { STARTFUNC; error_cb = reinterpret_cast <ErrorType>(callback); }
 }; // }}}
 
 template <class UserType>
@@ -280,6 +285,8 @@ public:
 	void set_closed_cb(ClosedCb callback) { closed_cb = reinterpret_cast <ClosedType>(callback); }
 	void set_error_cb(ErrorCb callback) { error_cb = reinterpret_cast <ErrorType>(callback); }
 }; // }}}
+
+}
 
 #endif
 

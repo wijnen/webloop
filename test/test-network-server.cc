@@ -3,22 +3,22 @@
 #include <iostream>
 
 class S {
-	std::list <Socket <S> > sockets;
-	Socket <S> local;
-	Server <S, S> server;
+	std::list <Webloop::Socket <S> > sockets;
+	Webloop::Socket <S> local;
+	Webloop::Server <S, S> server;
 public:
 	S() : sockets(), local(STDIN_FILENO, this), server("8567", this, &S::acceptor) {
 		local.read_lines(&S::stdin_cb);
 	}
 
 	void readcb(std::string &buffer) {
-		std::cerr << WebString(buffer).dump() << std::endl;
+		std::cerr << Webloop::WebString(buffer).dump() << std::endl;
 		if (buffer == "exit\n")
-			Loop::get()->stop();
+			Webloop::Loop::get()->stop();
 		buffer.clear();
 	}
 
-	void acceptor(Socket <S> *remote) {
+	void acceptor(Webloop::Socket <S> *remote) {
 		for (auto &i: sockets)
 			i.send("New connection.\n");
 		remote->read(&S::readcb);
@@ -35,7 +35,7 @@ int main() {
 	S s;
 	std::cerr << "running" << std::endl;
 	try {
-		Loop::get()->run();
+		Webloop::Loop::get()->run();
 	}
 	catch (char const *msg) {
 		std::cerr << "error: " << msg << std::endl;

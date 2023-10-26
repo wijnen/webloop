@@ -3,11 +3,11 @@
 struct Dummy {};
 
 int main() {
-	auto p = RPC <Dummy>("8000");
+	auto p = Webloop::RPC <Dummy>("8000");
 	auto coro = p.fgcall("get_version", {}, {});
 	coro();
 	while (!bool(coro))
-		Loop::get()->iteration(true);
+		Webloop::Loop::get()->iteration(true);
 	auto version = coro();
 	if (version)
 		std::cout << version->print() << std::endl;
