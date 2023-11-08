@@ -5,4 +5,5 @@
 
 override_dh_auto_clean:
 	test ! -f Makefile || make autoclean
+	${MAKE} -C test clean
 	dh_auto_clean

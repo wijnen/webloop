@@ -1,5 +1,5 @@
-#include "webobject.hh"
-#include "network.hh"
+#include "webloop/webobject.hh"
+#include "webloop/network.hh"
 #include <cmath>
 
 namespace Webloop {

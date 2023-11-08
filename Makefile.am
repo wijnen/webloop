@@ -28,7 +28,8 @@ VERSION_CURRENT = 0
 VERSION_REVISION = 0
 VERSION_AGE = 0
 
-webloopdir = $(prefix)/include/webloop
+webloopdir = $(prefix)/include
+webloopsubdir = $(prefix)/include/webloop
 pkgdir = $(libdir)/pkgconfig
 
 lib_LTLIBRARIES = libwebloop.la
@@ -53,17 +54,18 @@ JUNK = \
 	missing
 
 webloop_HEADERS = \
-	include/coroutine.hh \
-	include/fhs.hh \
-	include/http.hh \
-	include/loop.hh \
-	include/network.hh \
-	include/tools.hh \
-	include/url.hh \
-	include/webobject.hh \
-	include/websocketd.hh
+	include/webloop.hh
+webloopsub_HEADERS = \
+	include/webloop/coroutine.hh \
+	include/webloop/fhs.hh \
+	include/webloop/loop.hh \
+	include/webloop/network.hh \
+	include/webloop/tools.hh \
+	include/webloop/url.hh \
+	include/webloop/webobject.hh \
+	include/webloop/websocketd.hh
 
-libwebloop_la_SOURCES = $(webloop_HEADERS) \
+libwebloop_la_SOURCES = $(webloop_HEADERS) $(webloopsub_HEADERS) \
 	src/coroutine.cc \
 	src/fhs.cc \
 	src/loop.cc \

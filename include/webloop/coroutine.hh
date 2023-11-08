@@ -82,10 +82,10 @@ struct GetHandleAwaiter { // {{{
 	bool await_suspend(coroutine::handle_type the_handle) { STARTFUNC; handle = the_handle; return false; }
 	coroutine::handle_type await_resume() { STARTFUNC; return handle; }
 }; // }}}
-#define GetHandle() (co_await GetHandleAwaiter())
+#define GetHandle() (co_await Webloop::GetHandleAwaiter())
 
 // Defines to make yield slightly less horrible. {{{
-#define Yield(from_coroutine) (co_await YieldAwaiter(from_coroutine))
+#define Yield(from_coroutine) (co_await Webloop::YieldAwaiter(from_coroutine))
 
 // Similar to Python's "yield from". Usage:
 // YieldFromFull(variable_name, coroutine, first_argument);
@@ -95,11 +95,11 @@ struct GetHandleAwaiter { // {{{
 #define YieldFromFull(var, target, firstarg) \
 	var = target(firstarg); \
 	while (!bool(target)) { \
-		std::shared_ptr <WebObject> next = Yield(var); \
+		std::shared_ptr <Webloop::WebObject> next = Yield(var); \
 		var = target(next); \
 	}
 // Syntactic sugar for common case.
-#define YieldFrom(var, target) YieldFromFull(var, target, WebNone::create())
+#define YieldFrom(var, target) YieldFromFull(var, target, Webloop::WebNone::create())
 // }}}
 
 }

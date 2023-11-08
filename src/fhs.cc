@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // }}}*/
 
-#include "fhs.hh"
+#include "webloop/fhs.hh"
 #include <set>
 #include <ranges>
 #include <cassert>

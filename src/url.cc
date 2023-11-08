@@ -1,7 +1,7 @@
 #include <sstream>
 #include <iomanip>
-#include "url.hh"
-#include "tools.hh"
+#include "webloop/url.hh"
+#include "webloop/tools.hh"
 
 namespace Webloop {
 

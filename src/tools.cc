@@ -1,5 +1,5 @@
-#include "tools.hh"
-#include "webobject.hh"
+#include "webloop/tools.hh"
+#include "webloop/webobject.hh"
 #include <sstream>
 #include <ctime>
 #include <iostream>
