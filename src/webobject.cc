@@ -197,6 +197,14 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 		pos += 4;
 		return WebNone::create();
 	}
+	if (startswith(data, "false", pos)) {
+		pos += 5;
+		return WebBool::create(false);
+	}
+	if (startswith(data, "true", pos)) {
+		pos += 4;
+		return WebBool::create(true);
+	}
 	if (startswith(data, "NaN", pos)) {
 		pos += 3;
 		return WebFloat::create(NAN);
@@ -396,6 +404,12 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 	switch(data[0]) {
 	case 'N': // None
 		ret = new WebNone();
+		break;
+	case 'F': // Bool: false
+		ret = new WebBool(false);
+		break;
+	case 'T': // Bool: true
+		ret = new WebBool(true);
 		break;
 	case 'I': // Int
 		ret = new WebInt();

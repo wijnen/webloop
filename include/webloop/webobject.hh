@@ -21,6 +21,7 @@ namespace Webloop {
 #define WEBOBJECT_DUMPS_JSON
 
 class WebNone;
+class WebBool;
 class WebInt;
 class WebFloat;
 class WebString;
@@ -29,7 +30,7 @@ class WebMap;
 
 class WebObject { // {{{
 public:		// Types
-	enum Type { NONE, INT, FLOAT, STRING, VECTOR, MAP };
+	enum Type { NONE, BOOL, INT, FLOAT, STRING, VECTOR, MAP };
 	typedef std::vector <std::shared_ptr <WebObject> > VectorType;
 	typedef std::map <std::string, std::shared_ptr <WebObject> > MapType;
 	typedef int64_t IntType;
@@ -81,6 +82,29 @@ public:
 	std::string dump() const override { return "null"; }
 #else
 	std::string dump() const override { return "N"; }
+#endif
+}; // }}}
+
+class WebBool : public WebObject { // {{{
+	friend class WebString;
+	friend class WebVector;
+	friend class WebMap;
+	bool value;
+#ifndef WEBOBJECT_DUMPS_JSON
+	void load_impl(std::string const &data) override { assert(data.length() == 1); }
+#endif
+public:
+	WebBool() : WebObject(BOOL), value(false) {}
+	WebBool(bool value) : WebObject(BOOL), value(value) {}
+	static std::shared_ptr <WebBool> create(bool value) { return std::shared_ptr <WebBool> (new WebBool(value)); }
+	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebBool(*this)); }
+	operator bool() const { return value; }
+	operator bool &() { return value; }
+	std::string print() const override { return value ? "true" : "false"; }
+#ifdef WEBOBJECT_DUMPS_JSON
+	std::string dump() const override { return value ? "true" : "false"; }
+#else
+	std::string dump() const override { return value ? "T" : "F"; }
 #endif
 }; // }}}
 
@@ -186,6 +210,7 @@ public:
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebMap(*this)); }
 	std::shared_ptr <WebObject> &operator[](std::string const &key) { STARTFUNC; return value.at(key); }
 	std::shared_ptr <WebObject> const &operator[](std::string const &key) const { STARTFUNC; return value.at(key); }
+	size_t size() const { STARTFUNC; return value.size(); }
 	~WebMap() override { STARTFUNC; value.clear(); }
 }; // }}}
 
