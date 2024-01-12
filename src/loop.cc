@@ -35,26 +35,27 @@ int Loop::PollItems::add(IoRecord const &item) { // {{{
 	if (ret < items.size())
 		items[ret] = item;
 	else {
-		WL_log("adding new item; ret = " + std::to_string(ret) + "/" + std::to_string(items.size()));
+		//WL_log("adding new item; ret = " + std::to_string(ret) + "/" + std::to_string(items.size()));
 		assert(ret == items.size());
 		items.push_back(item);
 	}
-	WL_log("adding loop item " + std::to_string(ret));
+	//WL_log("adding loop item " + std::to_string(ret));
 	return ret;
 } // }}}
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
 	STARTFUNC;
-	WL_log("removing loop item " + std::to_string(index));
+	if (DEBUG > 3)
+		WL_log("removing loop item " + std::to_string(index));
 	assert(index >= 0);
 	assert(data[index].fd >= 0);
 	if (index == num - 1) {
 		--num;
 		items.pop_back();
 		// Remove newly last elements if they were empty.
-		while (!empty_items.empty() && *empty_items.end() == num - 1) {
-			empty_items.erase(empty_items.end());
+		while (!empty_items.empty() && *--empty_items.end() == num - 1) {
+			empty_items.erase(--empty_items.end());
 			--num;
 			items.pop_back();
 		}
@@ -81,7 +82,7 @@ std::string Loop::PollItems::print() { // {{{
 		ret << "\n\t" << data[i].fd << ": ";
 		if (i < items.size()) {
 			IoRecord &r = items[i];
-			ret << "data:" << r.object << " fd:" << r.fd << " events:" << r.events << (r.read ? " read" : "") << (r.write ? " write" : "") << (r.error ? " error" : "");
+			ret << r.name << " data:" << r.object << " fd:" << r.fd << " events:" << r.events << (r.read ? " read" : "") << (r.write ? " write" : "") << (r.error ? " error" : "");
 		}
 		else
 			ret << "X";
@@ -167,11 +168,16 @@ void Loop::run() { // {{{
 		iteration(idle.empty());
 		if (!running)
 			continue;
-		for (auto i = idle.begin(); i != idle.end(); ++i) {
+		std::list <IdleRecord>::iterator i = idle.begin();
+		std::list <IdleRecord>::iterator next;
+		while (i != idle.end()) {
+			next = i;
+			++next;
 			if (!(i->object->*(i->cb))())
 				remove_idle(i);
 			if (!running)
 				break;
+			i = next;
 		}
 	}
 	running = false;

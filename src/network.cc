@@ -57,7 +57,7 @@ namespace Webloop {
 // Read internals. {{{
 bool SocketBase::rawread_impl() { // {{{
 	STARTFUNC;
-	if (!rawread_cb)
+	if (rawread_cb == nullptr)
 		return false;
 	(user->*rawread_cb)();
 	return true;
@@ -71,7 +71,7 @@ bool SocketBase::read_impl() { // {{{
 		buffer += recv();
 	if (DEBUG > 3)
 		WL_log("new data; buffer:" + WebString(buffer).dump());
-	if (!read_cb)
+	if (read_cb == nullptr)
 		return false;
 	(user->*read_cb)(buffer);
 	return true;
@@ -83,7 +83,7 @@ bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
 		buffer = std::move(data);
 	else
 		buffer += data;
-	if (!read_lines_cb)
+	if (read_lines_cb == nullptr)
 		return false;
 	auto p = buffer.find_first_of("\r\n");
 	while (p != std::string::npos) {
@@ -117,16 +117,16 @@ void SocketBase::finish_move(SocketBase &&other) { // {{{
 
 		// Set new read callback.
 		CbType read;
-		if (rawread_cb)
+		if (rawread_cb != nullptr)
 			read = &SocketBase::rawread_impl;
-		else if (read_cb)
+		else if (read_cb != nullptr)
 			read = &SocketBase::read_impl;
-		else if (read_lines_cb)
+		else if (read_lines_cb != nullptr)
 			read = &SocketBase::read_lines_impl;
 		else
 			throw "read_handle was valid, but no callback was set";
 
-		read_handle = current_loop->add_io(Loop::IoRecord(this, fd, POLLIN | POLLPRI, read, CbType(), &SocketBase::error_impl));
+		read_handle = current_loop->add_io(Loop::IoRecord(name, this, fd, POLLIN | POLLPRI, read, CbType(), &SocketBase::error_impl));
 	}
 } // }}}
 
@@ -151,7 +151,9 @@ std::string SocketBase::recv() { // {{{
 	char buffer[maxsize];
 	auto num = ::read(fd, buffer, maxsize);
 	if (num < 0) {
-		WL_log("Error reading from socket");
+		if (errno == EWOULDBLOCK || errno == EAGAIN)
+			return std::string();
+		WL_log(std::string("Error reading from socket: ") + strerror(errno));
 		return close();
 	}
 	if (num == 0) {
@@ -167,7 +169,7 @@ std::string SocketBase::recv() { // {{{
 // }}}
 
 // Constructor- and destructor-related. {{{
-SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
+SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
 		fd(new_fd),
 		maxsize(4096),
 		current_loop(loop),
@@ -175,6 +177,7 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 		buffer(),
 		server(nullptr),
 		server_data(),
+		name(name),
 		user(user),
 		rawread_cb(nullptr),
 		read_cb(nullptr),
@@ -228,7 +231,8 @@ SocketBase::SocketBase(int new_fd, URL const &address, UserBase *user, Loop *loo
 		fd = -1;
 		for (auto rp = addr; rp; rp = rp->ai_next) {
 			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-			WL_log("attempt to connect; fd = " + std::to_string(fd));
+			if (DEBUG > 3)
+				WL_log("attempt to connect; fd = " + std::to_string(fd));
 			if (fd < 0) {
 				std::cerr << "unable to open socket: " << strerror(errno) << std::endl;
 				continue;
@@ -264,6 +268,7 @@ SocketBase::SocketBase(SocketBase &&other) : // {{{
 		buffer(std::move(other.buffer)),
 		server(other.server),
 		server_data(other.server_data),
+		name(other.name),
 		user(other.user),
 		rawread_cb(other.rawread_cb),
 		read_cb(other.read_cb),
@@ -287,6 +292,7 @@ SocketBase &SocketBase::operator=(SocketBase &&other) { // {{{
 	buffer = std::move(other.buffer);
 	server = other.server;
 	server_data = other.server_data;
+	name = other.name;
 	disconnect_cb = other.disconnect_cb;
 	user = other.user;
 	rawread_cb = other.rawread_cb;
@@ -310,8 +316,10 @@ std::string SocketBase::close() { // {{{
 	fd = -1;
 	if (server)
 		server->remote_disconnect(this->server_data);
-	if (disconnect_cb)
+	if (disconnect_cb != nullptr) {
+		assert(user != nullptr);
 		(user->*disconnect_cb)();
+	}
 	return pending;
 } // }}}
 // }}}
@@ -330,6 +338,8 @@ void SocketBase::send(std::string const &data) { // {{{
 	size_t p = 0;
 	while (p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);
+		if (DEBUG > 4)
+			WL_log("written " + std::to_string(n) + " bytes");
 		if (n <= 0) {
 			std::cerr << "failed to write data to socket";
 			close();
@@ -353,7 +363,7 @@ std::string SocketBase::rawread_base(RawReadType callback) { // {{{
 		return std::string();
 	std::string ret = unread();
 	rawread_cb = callback;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
+	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
 	read_handle = current_loop->add_io(read_item);
 	return ret;
 } // }}}
@@ -378,7 +388,7 @@ void SocketBase::read_base(ReadType callback) { // {{{
 	std::string first = unread();
 	maxsize = maxsize;
 	read_cb = callback;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::read_impl, CbType(), &SocketBase::error_impl};
+	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::read_impl, CbType(), &SocketBase::error_impl};
 	read_handle = current_loop->add_io(read_item);
 	if (!first.empty())
 		(user->*read_cb)(first);
@@ -403,7 +413,7 @@ void SocketBase::read_lines_base(ReadLinesType callback) { // {{{
 	std::string first = unread();
 	maxsize = maxsize;
 	read_lines_cb = callback;
-	Loop::IoRecord read_item {this, fd, POLLIN | POLLPRI, &SocketBase::read_lines_impl, CbType(), &SocketBase::error_impl};
+	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::read_lines_impl, CbType(), &SocketBase::error_impl};
 	read_handle = current_loop->add_io(read_item);
 	if (!first.empty())
 		handle_read_line_data(std::move(first));
@@ -455,7 +465,7 @@ void ServerBase::open_socket(std::string const &service, int backlog) { // {{{
 			std::cerr << "unable to bind unix socket: " << strerror(errno) << std::endl;
 			throw "unable to open socket";
 		}
-		listeners.emplace_back(this, fd);
+		listeners.emplace_back("unix domain", this, fd);
 	}
 	else {
 		struct addrinfo addr_hint;
@@ -488,7 +498,7 @@ void ServerBase::open_socket(std::string const &service, int backlog) { // {{{
 				::close(fd);
 				continue;
 			}
-			listeners.emplace_back(this, fd);
+			listeners.emplace_back("tcp/ip", this, fd);
 		}
 		freeaddrinfo(addr);
 		if (listeners.empty()) {
@@ -515,7 +525,7 @@ void ServerBase::Listener::accept_remote() { // {{{
 		addrlen = sizeof(addr);
 	}
 	// Create a generic socket; move it to the correct type later.
-	Socket <SocketBase::UserBase> remote(new_fd, nullptr);
+	Socket <SocketBase::UserBase> remote("incoming on " + name, new_fd, nullptr);
 	server->remotes.push_back(&remote);
 	remote.server = server;
 	remote.server_data = --server->remotes.end();

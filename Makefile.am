@@ -75,7 +75,7 @@ libwebloop_la_SOURCES = $(webloop_HEADERS) $(webloopsub_HEADERS) \
 	src/webobject.cc \
 	src/websocketd.cc
 
-libwebloop_la_CPPFLAGS = -Iinclude -Wall -Werror -ggdb3 -std=c++23
+libwebloop_la_CPPFLAGS = -Iinclude -Wall -Wextra -Werror -ggdb3 -std=c++23
 libwebloop_la_LDFLAGS = -Wl,--version-script -Wl,symbol-versions -version-info $(VERSION_CURRENT):$(VERSION_REVISION):$(VERSION_AGE) -Wl,--as-needed
 libwebloop_la_LIBADD = -ldl -lpthread
 libwebloop_la_DEPENDENCIES = symbol-versions

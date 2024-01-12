@@ -98,6 +98,8 @@ private:
 	// For server sockets: iterator into Server's socket list.
 	std::list <SocketBase *>::iterator server_data;
 
+	std::string name; // for debugging.
+
 	// Functions that are registered in the Loop.
 	typedef bool (SocketBase::*CbType)();
 	bool rawread_impl();
@@ -107,7 +109,7 @@ private:
 	// Pass errors to user object and close the socket.
 	bool error_impl() {
 		buffer += unread();
-		if (error_cb)
+		if (error_cb != nullptr)
 			(user->*error_cb)("error on socket");
 		close();
 		return false;
@@ -143,7 +145,7 @@ public:
 	URL url;
 
 	// Constructor.
-	SocketBase(int fd, URL const &url, UserBase *user, Loop *loop);
+	SocketBase(std::string const &name, int fd, URL const &url, UserBase *user, Loop *loop);
 
 	// Move support.
 	SocketBase(SocketBase &&other);
@@ -164,6 +166,10 @@ public:
 
 	// Check if socket is connected.
 	operator bool() const { return fd >= 0; }
+
+	// Set and get name.
+	constexpr std::string const &get_name() const { return name; }
+	void set_name(std::string const &n) { name = n; if (read_handle >= 0) current_loop->update_name(read_handle, n); }
 }; // }}}
 
 // Socket <UserType> {{{
@@ -177,11 +183,11 @@ public:
 	typedef void (UserType::*ErrorCb)(std::string const &message);
 
 	// Create client socket, which connects to server.
-	Socket(std::string const &address, UserType *user = nullptr);
+	Socket(std::string const &name, std::string const &address, UserType *user = nullptr);
 	// Use existing socket (or other fd). This is used by Server to handle accepted requests, and can be used to fake sockets.
-	Socket(int fd = -1, UserType *user = nullptr, Loop *loop = nullptr)	 // Use an fd as a "socket", so it can use the functionality of this class. {{{
+	Socket(std::string const &name, int fd = -1, UserType *user = nullptr, Loop *loop = nullptr)	 // Use an fd as a "socket", so it can use the functionality of this class. {{{
 		:
-			SocketBase(fd, URL(), reinterpret_cast <SocketBase::UserBase *>(user), Loop::get(loop))
+			SocketBase(name, fd, URL(), reinterpret_cast <SocketBase::UserBase *>(user), Loop::get(loop))
 			{ STARTFUNC; } // }}}
 
 	// Move support.
@@ -192,7 +198,7 @@ public:
 
 	// Read event scheduling.
 	std::string rawread(RawReadCb callback) { STARTFUNC; return rawread_base(reinterpret_cast <RawReadType>(callback)); }
-	void read(ReadCb callback) { STARTFUNC; WL_log("fd: " + std::to_string(get_fd())); read_base(reinterpret_cast <ReadType>(callback)); }
+	void read(ReadCb callback) { STARTFUNC; read_base(reinterpret_cast <ReadType>(callback)); }
 	void read_lines(ReadLinesCb callback) { STARTFUNC; read_lines_base(reinterpret_cast <ReadLinesType>(callback)); }
 	// Other events.
 	void set_disconnect_cb(DisconnectCb callback) { STARTFUNC; disconnect_cb = reinterpret_cast <DisconnectType>(callback); }
@@ -200,9 +206,9 @@ public:
 }; // }}}
 
 template <class UserType>
-Socket <UserType>::Socket(std::string const &address, UserType *user) // {{{
+Socket <UserType>::Socket(std::string const &name, std::string const &address, UserType *user) // {{{
 	:
-		SocketBase(-1, address, reinterpret_cast <SocketBase::UserBase *>(user), Loop::get())
+		SocketBase(name, -1, address, reinterpret_cast <SocketBase::UserBase *>(user), Loop::get())
 {
 	STARTFUNC;
 } // }}}
@@ -229,7 +235,8 @@ private:
 		ServerBase *server;
 		int fd;
 		Socket <Listener> socket;
-		Listener(ServerBase *server, int fd) : server(server), fd(fd), socket(fd, this) {}
+		std::string name;
+		Listener(std::string const &name, ServerBase *server, int fd) : server(server), fd(fd), socket("server listener " + name, fd, this), name(name) {}
 		void accept_remote();
 	};
 	Loop *listenloop;

@@ -317,7 +317,7 @@ static std::list <std::filesystem::path> read_names( // {{{
 	if (build_packagename_dirs)
 		all_dirs.insert(all_dirs.end(), packagename_dirs.begin(), packagename_dirs.end());
 
-	for (auto d: dirs) {
+	for (auto d: all_dirs) {
 		std::filesystem::path t = d / filename;
 		if (!contains(t) && (dir ? std::filesystem::is_directory(t) : std::filesystem::is_regular_file(t))) {
 			result.push_back(t);

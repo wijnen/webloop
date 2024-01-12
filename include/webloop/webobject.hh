@@ -41,6 +41,7 @@ public:		// Member functions
 	WebObject(Type type) : type(type) {}
 
 	WebNone *as_none() { assert(type == NONE); return reinterpret_cast <WebNone *>(this); }
+	WebBool *as_bool() { assert(type == BOOL); return reinterpret_cast <WebBool *>(this); }
 	WebInt *as_int() { assert(type == INT); return reinterpret_cast <WebInt *>(this); }
 	WebFloat *as_float() { assert(type == FLOAT); return reinterpret_cast <WebFloat *>(this); }
 	WebString *as_string() { assert(type == STRING); return reinterpret_cast <WebString *>(this); }
@@ -67,6 +68,26 @@ private:
 #endif
 }; // }}}
 
+class WebHelper { // {{{
+	std::shared_ptr <WebObject> data;
+public:
+	inline WebHelper();
+	inline WebHelper(bool src);
+	inline WebHelper(WebObject::IntType src);
+	inline WebHelper(WebObject::FloatType src);
+	inline WebHelper(char const *src);
+	inline WebHelper(std::string const &src);
+	inline WebHelper(std::shared_ptr <WebNone> src);
+	inline WebHelper(std::shared_ptr <WebBool> src);
+	inline WebHelper(std::shared_ptr <WebInt> src);
+	inline WebHelper(std::shared_ptr <WebFloat> src);
+	inline WebHelper(std::shared_ptr <WebString> src);
+	inline WebHelper(std::shared_ptr <WebVector> src);
+	inline WebHelper(std::shared_ptr <WebMap> src);
+	WebHelper(std::shared_ptr <WebObject> src) : data (src) {}
+	operator std::shared_ptr <WebObject>() const { return data; }
+}; // }}}
+
 // Object class definitions.
 class WebNone : public WebObject { // {{{
 #ifndef WEBOBJECT_DUMPS_JSON
@@ -77,7 +98,7 @@ public:
 	WebNone() : WebObject(NONE) {}
 	static std::shared_ptr <WebNone> create() { return instance; }
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebNone()); }
-	std::string print() const override { return "[None]"; }
+	std::string print() const override { return "None"; }
 #ifdef WEBOBJECT_DUMPS_JSON
 	std::string dump() const override { return "null"; }
 #else
@@ -181,6 +202,8 @@ public:
 	WebVector(WebVector &&other) : WebObject(VECTOR), value(other.value) { other.value.clear(); }
 	template <typename... Ts> WebVector(Ts... args) : WebObject(VECTOR), value() { value.assign({args...}); }
 	template <typename... Ts> static std::shared_ptr <WebVector> create(Ts... args) { return std::shared_ptr <WebVector> (new WebVector(args...)); }
+	WebVector(std::initializer_list <WebHelper> args) : WebObject(VECTOR), value() { for (unsigned i = 0; i < args.size(); ++i) value.push_back(args.begin()[i]); }
+	static std::shared_ptr <WebVector> build(std::initializer_list <WebHelper> args) { return std::shared_ptr <WebVector> (new WebVector(args)); }
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebVector(*this)); }
 	//operator VectorType const &() const { return value; }
 	//operator VectorType &() { return value; }
@@ -207,12 +230,52 @@ public:
 	WebMap(WebMap &&other) : WebObject(MAP), value(other.value) { other.value.clear(); }
 	template <typename... Ts> WebMap(Ts... args) : WebObject(MAP), value({args...}) {}
 	template <typename... Ts> static std::shared_ptr <WebMap> create(Ts... args) { return std::shared_ptr <WebMap> (new WebMap(args...)); }
+	WebMap(std::initializer_list <std::tuple <std::string, WebHelper> > args) : WebObject(MAP), value() { for (unsigned i = 0; i < args.size(); ++i) value.insert(std::pair <std::string, std::shared_ptr <WebObject> > (std::get <0> (args.begin()[i]), std::get <1> (args.begin()[i]))); }
+	static std::shared_ptr <WebMap> build(std::initializer_list <std::tuple <std::string, WebHelper> > args) { return std::shared_ptr <WebMap> (new WebMap(args)); }
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebMap(*this)); }
-	std::shared_ptr <WebObject> &operator[](std::string const &key) { STARTFUNC; return value.at(key); }
+	std::shared_ptr <WebObject> &operator[](std::string const &key) { STARTFUNC; return value[key]; }
 	std::shared_ptr <WebObject> const &operator[](std::string const &key) const { STARTFUNC; return value.at(key); }
 	size_t size() const { STARTFUNC; return value.size(); }
 	~WebMap() override { STARTFUNC; value.clear(); }
 }; // }}}
+
+// WebHelper constructors. {{{
+WebHelper::WebHelper() : data(dynamic_pointer_cast <WebObject> (WebNone::create())) {}
+WebHelper::WebHelper(bool src) : data(dynamic_pointer_cast <WebObject> (WebBool::create(src))) {}
+WebHelper::WebHelper(WebObject::IntType src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(WebObject::FloatType src) : data(dynamic_pointer_cast <WebObject> (WebFloat::create(src))) {}
+WebHelper::WebHelper(char const *src) : data(dynamic_pointer_cast <WebObject> (WebString::create(src))) {}
+WebHelper::WebHelper(std::string const &src) : data(dynamic_pointer_cast <WebObject> (WebString::create(src))) {}
+WebHelper::WebHelper(std::shared_ptr <WebNone> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebBool> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebInt> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebFloat> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebString> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebVector> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+WebHelper::WebHelper(std::shared_ptr <WebMap> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+// }}}
+
+// Literals for base types. These can only be used with "using namespace Webloop".
+static inline std::shared_ptr <WebBool> operator ""_wb(char const *src, size_t size) {
+	(void)&size;
+	assert((size == 4 && src[0] == 't' && src[1] == 'r' && src[2] == 'u' && src[3] == 'e') || (size == 5 && src[0] == 'f' && src[1] == 'a' && src[2] == 'l' && src[3] == 's' && src[4] == 'e'));
+	return WebBool::create(src[0] == 't');
+}
+static inline std::shared_ptr <WebInt> operator ""_wi(unsigned long long src) { return WebInt::create(src); }
+static inline std::shared_ptr <WebFloat> operator ""_wf(long double src) { return WebFloat::create(src); }
+static inline std::shared_ptr <WebString> operator ""_ws(char const *src) { return WebString::create(src); }
+
+// Short form to create a WebNone.
+static inline std::shared_ptr <WebNone> WN() { return WebNone::create(); }
+
+// Sort form to create a tuple, used by WM().
+static inline std::tuple <std::string, WebHelper> WT(std::string const &key, WebHelper &&data) { return {key, data}; }
+
+// Short form to create a WebVector.
+template <typename... Ts> inline std::shared_ptr <WebVector> WV(Ts... args) { return WebVector::build({args...}); }
+
+// Short form to create a WebMap.
+template <typename... Ts> inline std::shared_ptr <WebMap> WM(Ts... args) { return WebMap::build({args...}); }
 
 }
 

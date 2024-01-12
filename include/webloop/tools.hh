@@ -16,8 +16,8 @@ namespace Webloop {
 // * 5: Non-websocket data.
 extern int DEBUG;
 
-#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
-//#define STARTFUNC do {} while(0)
+//#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
+#define STARTFUNC do {} while(0)
 
 std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
 std::string lstrip(std::string const &src, std::string const &chars = " \t\r\n\v\f");

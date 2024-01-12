@@ -26,33 +26,36 @@ public:
 		Cb read;
 		Cb write;
 		Cb error;
+		std::string name;	// For debugging.
 		template <class UserType>
-		IoRecord(UserType *obj, int fd, short events, bool (UserType::*r)(), bool (UserType::*w)(), bool (UserType::*e)()) :
+		IoRecord(std::string const &name, UserType *obj, int fd, short events, bool (UserType::*r)(), bool (UserType::*w)(), bool (UserType::*e)()) :
 			object(reinterpret_cast <CbBase *>(obj)),
 			fd(fd),
 			events(events),
 			read(reinterpret_cast <CbType>(r)),
 			write(reinterpret_cast <CbType>(w)),
-			error(reinterpret_cast <CbType>(e))
+			error(reinterpret_cast <CbType>(e)),
+			name(name)
 		{}
+		void set_name(std::string const &n) { name = n; }
 	}; // }}}
 
-	struct IdleRecord {
+	struct IdleRecord { // {{{
 		CbBase *object;
 		Cb cb;
 		// Allow initializing this struct from any base class, as long as the cb matches the object.
 		template <class Base> IdleRecord(Base *object, bool (Base::*cb)()) : object(reinterpret_cast <CbBase *>(object)), cb(reinterpret_cast <Cb>(cb)) {}
-	};
+	}; // }}}
 	typedef std::list <IdleRecord>::iterator IdleHandle;
 
-	struct TimeoutRecord {
+	struct TimeoutRecord { // {{{
 		Time time;
 		Duration interval;	// 0 for single shot.
 		CbBase *object;
 		Cb cb;
 		bool operator<(TimeoutRecord const &other) const { return time < other.time; }
 		template <class Base> TimeoutRecord(Time const &time, Duration interval, Base *object, bool (Base::*cb)()) : time(time), interval(interval), object(reinterpret_cast <CbBase *>(object)), cb(reinterpret_cast <Cb>(cb)) {}
-	};
+	}; // }}}
 	typedef std::list <TimeoutRecord>::iterator TimeoutHandle;
 
 	typedef int IoHandle;
@@ -71,6 +74,7 @@ private:
 		int add(IoRecord const &item);
 		void remove(int index);
 		std::string print();
+		void update_name(IoHandle handle, std::string const &n) { items[handle].set_name(n); }
 	}; // }}}
 
 	static Loop fallback_loop;
@@ -85,6 +89,7 @@ public:
 	static Loop *get(Loop *arg = nullptr);
 	Loop() : running(false), aborting(false) { if (!default_loop) default_loop = this; }
 	Time now() { return std::chrono::steady_clock::now(); }
+	constexpr bool is_running () const { return running; }
 	int handle_timeouts();
 	void iteration(bool block = false);
 	void run();
@@ -97,6 +102,8 @@ public:
 	void remove_io(IoHandle handle) { items.remove(handle); }
 	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }
 	void remove_idle(IdleHandle handle) { idle.erase(handle); }
+
+	void update_name(IoHandle handle, std::string const &n) { items.update_name(handle, n); }
 };
 
 }

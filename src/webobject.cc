@@ -4,7 +4,7 @@
 
 namespace Webloop {
 
-std::shared_ptr <WebNone> WebNone::instance;
+std::shared_ptr <WebNone> WebNone::instance = std::shared_ptr <WebNone>(new WebNone());
 
 std::string WebFloat::dump() const { // {{{
 #ifdef WEBOBJECT_DUMPS_JSON
@@ -190,6 +190,8 @@ static std::string read_string(std::string const &data, std::string::size_type &
 } // }}}
 
 static std::shared_ptr <WebObject> load_item(std::string const &data, std::string::size_type &pos) { // {{{
+	STARTFUNC;
+	//WL_log("loading " + data.substr(pos));
 	pos = data.find_first_not_of(" \t\n\r\v\f", pos);
 	if (pos == std::string::npos)
 		return WebNone::create();
@@ -232,6 +234,7 @@ static std::shared_ptr <WebObject> load_item(std::string const &data, std::strin
 		}
 		while (true) {
 			auto item = load_item(data, pos);
+			//WL_log("loaded vector element: " + item->print());
 			vector->push_back(item);
 			if (pos == std::string::npos || pos >= data.size()) {
 				WL_log("incomplete vector");
