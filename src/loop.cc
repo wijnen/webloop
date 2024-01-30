@@ -39,14 +39,14 @@ int Loop::PollItems::add(IoRecord const &item) { // {{{
 		assert(ret == items.size());
 		items.push_back(item);
 	}
-	//WL_log("adding loop item " + std::to_string(ret));
+	WL_log("adding loop item " + std::to_string(ret));
 	return ret;
 } // }}}
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
 	STARTFUNC;
-	if (DEBUG > 3)
+	//if (DEBUG > 3)
 		WL_log("removing loop item " + std::to_string(index));
 	assert(index >= 0);
 	assert(data[index].fd >= 0);
@@ -163,21 +163,21 @@ void Loop::run() { // {{{
 	running = true;
 	aborting = false;
 	while (running) {
-		if (DEBUG > 4)
+		//if (DEBUG > 4)
 			WL_log("running, items = " + items.print());
 		iteration(idle.empty());
 		if (!running)
 			continue;
+		// Run all the idle tasks.
 		std::list <IdleRecord>::iterator i = idle.begin();
-		std::list <IdleRecord>::iterator next;
 		while (i != idle.end()) {
-			next = i;
-			++next;
+			next_idle_item = i;
+			++next_idle_item;
 			if (!(i->object->*(i->cb))())
 				remove_idle(i);
 			if (!running)
 				break;
-			i = next;
+			i = next_idle_item;
 		}
 	}
 	running = false;
@@ -193,6 +193,12 @@ void Loop::stop(bool force) { // {{{
 	running = false;
 	if (force)
 		aborting = true;
+} // }}}
+
+void Loop::remove_idle(IdleHandle handle) { // {{{
+	if (handle == next_idle_item)
+		++next_idle_item;
+	idle.erase(handle);
 } // }}}
 
 Loop *Loop::default_loop;

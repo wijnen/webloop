@@ -135,7 +135,7 @@ public:
 	RunSettings run_settings;
 	std::map <std::string, std::string> received_headers;	// Headers that are received from server. (Only for accepted websockets.)
 	void disconnect(bool send_to_websocket = true);
-	Websocket() {}
+	Websocket();
 	Websocket(std::string const &address, ConnectSettings const &connect_settings = {}, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
 	Websocket(int socket_fd, UserType *user = nullptr, Receiver receiver = {}, RunSettings const &run_settings = {});
 	template <class ServerType>
@@ -152,9 +152,10 @@ public:
 	bool keepalive();
 	void send(std::string const &data, int opcode = 1); // Send a WebSocket frame.
 	bool ping(std::string const &data = std::string()); // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong.
+	bool closed() const { return is_closed; }
 
 	// Get and set socket name.
-	constexpr std::string const &get_name() const { return socket->get_name(); }
+	constexpr std::string const &get_name() const { return socket.get_name(); }
 	void set_name(std::string const &n) { socket.set_name(n); }
 }; // }}}
 
@@ -165,10 +166,34 @@ void Websocket <UserType>::disconnect(bool send_to_websocket) { // {{{
 	if (is_closed)
 		return;
 	is_closed = true;
-	Loop::get()->remove_timeout(keepalive_handle);
+	if (keepalive_handle != Webloop::Loop::TimeoutHandle()) {
+		Loop::get()->remove_timeout(keepalive_handle);
+		keepalive_handle = Webloop::Loop::TimeoutHandle();
+	}
 	if (send_to_websocket)
 		send(std::string(), 8);
 	socket.close();
+} // }}}
+
+template <class UserType>
+Websocket <UserType>::Websocket() : // {{{
+	socket(),
+	buffer(),
+	fragments(),
+	keepalive_handle(),
+	is_closed(true),
+	pong_seen(true),
+	current_opcode(uint8_t(-1)),
+	receiver(),
+	send_mask(false),
+	user(),
+	disconnect_cb(),
+	error_cb(),
+	connect_settings(),
+	run_settings(),
+	received_headers()
+{
+	STARTFUNC;
 } // }}}
 
 template <class UserType>
@@ -269,11 +294,11 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 			if (!r.empty())
 				break;
 			if (errno == 0)
-				throw "EOF while reading reply";
+				throw "EOF while reading first line of response";
 			if (errno == EWOULDBLOCK)
 				continue;
-			WL_log(std::string("Error reading from socket: ") + strerror(errno));
-			throw "Error reading from socket";
+			WL_log(std::string("Error reading first line from socket: ") + strerror(errno));
+			throw "Error reading first line from socket";
 		}
 		hdrdata += r;
 	}
@@ -289,9 +314,19 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 	while (true) {
 		pos = hdrdata.find("\n");
 		if (pos == std::string::npos) {
-			std::string r = socket.recv();	// FIXME: this should not be a blocking call.
-			if (r.empty())
-				throw "EOF while reading reply";
+			errno = 0;
+			std::string r;
+			while (true) {
+				r = socket.recv();	// FIXME: this should not be a blocking call.
+				if (!r.empty())
+					break;
+				if (errno == 0)
+					throw "EOF while reading header";
+				if (errno == EWOULDBLOCK)
+					continue;
+				WL_log(std::string("Error reading header from socket: ") + strerror(errno));
+				throw "Error reading header from socket";
+			}
 			hdrdata += r;
 			continue;
 		}
@@ -457,7 +492,7 @@ Websocket <UserType>::Websocket(Websocket <UserType> &&other) : // {{{
 template <class UserType>
 Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&other) { // {{{
 	disconnect();
-	socket = std::move(other);
+	socket = std::move(other.socket);
 	buffer = std::move(other.buffer);
 	fragments = std::move(other.fragments);
 	is_closed = other.is_closed;
@@ -481,6 +516,7 @@ Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&oth
 	other.is_closed = true;
 	socket.set_disconnect_cb(&Websocket <UserType>::disconnect_impl);
 	socket.set_error_cb(&Websocket <UserType>::error_impl);
+	return *this;
 } // }}}
 
 template <class UserType>
@@ -749,6 +785,7 @@ public:
 	typedef void (OwnerType::*ErrorCb)(std::string const &message);
 	typedef void (OwnerType::*AcceptCb)(Connection &connection);
 	OwnerType *owner;				// User data to send with callbacks.
+	std::string service;				// Service (name or port number) that the server listens on.
 	std::list <Connection> connections;		// Active connections, including non-websockets.
 private:
 	std::list <std::filesystem::path> htmldirs;	// Directories where static web pages are searched.
@@ -800,6 +837,7 @@ void Httpd <OwnerType>::create_connection(Socket <Connection> *socket) { // {{{
 template <class OwnerType>
 Httpd <OwnerType>::Httpd(OwnerType *owner, std::string const &service, std::string const &htmldir, Loop *loop, int backlog) : // {{{
 		owner(owner),
+		service(service),
 		connections{},
 		// The default location for html files is "html"; if it is set to "" by the caller, no html pages will be served.
 		htmldirs(htmldir.empty() ? std::list <std::filesystem::path>() : read_data_names(htmldir, {}, true, true)),
@@ -1537,12 +1575,12 @@ private:
 
 	// Members for handling calls from remote.
 	std::list <Call> delayed_calls;	// Pending received calls, to be made when socket is activated.
-	struct CalledData {
+	struct CalledData { // {{{
 		std::list <CalledData>::iterator iterator;
 		RPC <UserType> *rpc;
 		int id;
 		void called_return(std::shared_ptr <WebObject> ret);
-	};
+	}; // }}}
 	std::list <CalledData> called_data;
 
 	int get_index();
@@ -1559,32 +1597,69 @@ public:
 	void set_error_cb(ErrorCb cb) { error_cb = cb; }
 	void disconnect() { websocket.disconnect(); }
 
+	// Empty constructor, for moving a connected object into.
+	RPC() : disconnect_cb(nullptr), error_cb(nullptr), activation_handle(Loop::get()->invalid_idle()), activated(false), user(nullptr), reply_index(0), expecting_reply_bg{}, expecting_reply_fg{}, delayed_calls{}, called_data{}, websocket{} {}
 	// Constructor to connect to host.
 	RPC(std::string const &address, UserType *user = nullptr, Websocket <RPC <UserType> >::ConnectSettings const &connect_settings = {.method = "GET", .user = {}, .password = {}, .sent_headers = {}}, Websocket <RPC <UserType> >::RunSettings const &run_settings = {.loop = nullptr, .keepalive = 50s});
-	~RPC() {
+	~RPC() { // {{{
 		STARTFUNC;
-		if (activation_handle != Loop::IdleHandle())
+		if (activation_handle != Loop::get()->invalid_idle())
 			Loop::get(websocket.run_settings.loop)->remove_idle(activation_handle);
-		activation_handle = Loop::IdleHandle();
-	}
+		activation_handle = Loop::get()->invalid_idle();
+	} // }}}
+
+	RPC(RPC <UserType> &&other) : disconnect_cb(other.disconnect_cb), error_cb(other.error_cb), activation_handle(Loop::get()->invalid_idle()), activated(other.activated), user(other.user), reply_index(other.reply_index), expecting_reply_bg(std::move(other.expecting_reply_bg)), expecting_reply_fg(std::move(other.expecting_reply_fg)), delayed_calls(std::move(other.delayed_calls)), called_data(std::move(other.called_data)), websocket(std::move(other.websocket)) { // {{{
+		STARTFUNC;
+		WL_log("moving rpc");
+		if (other.activation_handle != Loop::get()->invalid_idle()) {
+			Webloop::Loop::get(websocket.run_settings.loop)->remove_idle(other.activation_handle);
+			other.activation_handle = Loop::get()->invalid_idle();
+			activation_handle = Loop::get(websocket.run_settings.loop)->add_idle(Loop::IdleRecord(this, &RPC <UserType>::activate));
+		}
+	} // }}}
+
+	RPC <UserType> &operator=(RPC <UserType> &&other) { // {{{
+		STARTFUNC;
+		WL_log("moving rpc assign");
+		if (activation_handle != Loop::get()->invalid_idle()) {
+			Loop::get(websocket.run_settings.loop)->remove_idle(activation_handle);
+			activation_handle = Loop::get()->invalid_idle();
+		}
+		disconnect_cb = other.disconnect_cb;
+		error_cb = other.error_cb;
+		activated = other.activated;
+		user = other.user;
+		reply_index = other.reply_index;
+		expecting_reply_bg = std::move(other.expecting_reply_bg);
+		expecting_reply_fg = std::move(other.expecting_reply_fg);
+		delayed_calls = std::move(other.delayed_calls);
+		called_data = std::move(other.called_data);
+		websocket = std::move(other.websocket);
+		if (other.activation_handle != Loop::get()->invalid_idle()) {
+			Webloop::Loop::get(websocket.run_settings.loop)->remove_idle(other.activation_handle);
+			other.activation_handle = Loop::get()->invalid_idle();
+			activation_handle = Loop::get(websocket.run_settings.loop)->add_idle(Loop::IdleRecord(this, &RPC <UserType>::activate));
+		}
+		return *this;
+	} // }}}
 
 	// Constructor for use by accepted sockets through Httpd.
-	template <class ConnectionType> RPC(ConnectionType &connection, UserType *user);
+	template <class ConnectionType> explicit RPC(ConnectionType &connection, UserType *user);
 
 	// RPC calls.
 	void bgcall(std::string const &target, std::shared_ptr <WebVector> args = {}, std::shared_ptr <WebMap> kwargs = {}, BgReply reply = nullptr);
 	coroutine fgcall(std::string const &target, std::shared_ptr <WebVector> args = {}, std::shared_ptr <WebMap> kwargs = {});
 
 	// For debugging.
-	void print_expecting() {
-		/*
-		WL_log("expecting:");
+	void print_expecting(std::string const &msg) {
+		//*
+		WL_log("expecting for " + msg + " of " + websocket.get_name() + ":");
 		for (auto fgid: expecting_reply_fg)
 			WL_log("fg: " + std::to_string(fgid.first));
 		for (auto bgid: expecting_reply_bg)
 			WL_log("bg: " + std::to_string(bgid.first));
 		WL_log("end of list");
-		*/
+		//*/
 	}
 }; // }}}
 
@@ -1593,8 +1668,7 @@ template <class UserType>
 int RPC <UserType>::get_index() { // {{{
 	STARTFUNC;
 	++reply_index;
-	//WL_log("creating reply index");
-	print_expecting();
+	print_expecting("creating reply index");
 	while (expecting_reply_bg.contains(reply_index) || expecting_reply_fg.contains(reply_index) || reply_index == 0)
 		++reply_index;
 	return reply_index;
@@ -1606,7 +1680,7 @@ bool RPC <UserType>::activate() { // {{{
 	/* Internal use only.  Activate the websocket; send initial frames.
 	@return None.
 	*/
-	activation_handle = Loop::IdleHandle();
+	activation_handle = Loop::get()->invalid_idle();
 	while (!delayed_calls.empty()) {
 		auto calls = std::move(delayed_calls);
 		delayed_calls.clear();
@@ -1661,7 +1735,7 @@ void RPC <UserType>::recv(std::string const &frame) { // {{{
 		int id = 0;
 		if (length == 3) {
 			WL_log("error received");
-			print_expecting();
+			print_expecting("error received");
 			auto idobj = (*vdata)[1];
 			if (idobj->get_type() != WebObject::INT) {
 				WL_log("error id is not int");
@@ -1692,7 +1766,7 @@ void RPC <UserType>::recv(std::string const &frame) { // {{{
 	if (ptype == "return") { // string:"return", int:id, WebObject:value {{{
 		if (DEBUG > 2)
 			WL_log("return received");
-		print_expecting();
+		print_expecting("return received");
 		if (length != 2) {
 			WL_log("not exactly 1 argument received with return");
 			return;
@@ -1720,7 +1794,7 @@ void RPC <UserType>::recv(std::string const &frame) { // {{{
 			auto q = expecting_reply_fg.find(id);
 			if (q == expecting_reply_fg.end()) {
 				WL_log("invalid return id received: " + std::to_string(id));
-				print_expecting();
+				print_expecting("invalid return id");
 				return;
 			}
 			// This is the return call of a fgcall().
@@ -1847,7 +1921,7 @@ template <class UserType>
 RPC <UserType>::RPC(std::string const &address, UserType *user, Websocket <RPC <UserType> >::ConnectSettings const &connect_settings, Websocket <RPC <UserType> >::RunSettings const &run_settings) : // {{{
 		disconnect_cb(),
 		error_cb(),
-		activation_handle(),
+		activation_handle(Loop::get()->invalid_idle()),
 		activated(false),
 		user(user),
 		reply_index(0),
@@ -1876,7 +1950,7 @@ template <class UserType> template <class ConnectionType>
 RPC <UserType>::RPC(ConnectionType &connection, UserType *user) : // {{{
 		disconnect_cb(),
 		error_cb(),
-		activation_handle(),
+		activation_handle(Loop::get()->invalid_idle()),
 		activated(true),
 		user(user),
 		reply_index(0),
@@ -1913,7 +1987,7 @@ void RPC <UserType>::bgcall( // {{{
 		index = 0;
 	if (DEBUG > 3)
 		WL_log("sending bg call");
-	print_expecting();
+	print_expecting("send bg call");
 	send("call", WebVector::create(index == 0 ? std::dynamic_pointer_cast <WebObject> (WebNone::create()) : std::dynamic_pointer_cast <WebObject> (WebInt::create(index)), WebString::create(target), args, kwargs));
 } // }}}
 
@@ -1928,7 +2002,7 @@ coroutine RPC <UserType>::fgcall(std::string const &target, std::shared_ptr <Web
 	expecting_reply_fg[index] = GetHandle();
 	if (DEBUG > 4)
 		WL_log("sending fg call");
-	print_expecting();
+	print_expecting("send fg call");
 	send("call", WebVector::create(WebInt::create(index), WebString::create(target), args, kwargs));
 	auto ret = Yield(WebNone::create());
 	if (DEBUG > 4)

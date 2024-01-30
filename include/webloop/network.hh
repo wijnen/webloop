@@ -148,6 +148,7 @@ public:
 	SocketBase(std::string const &name, int fd, URL const &url, UserBase *user, Loop *loop);
 
 	// Move support.
+	SocketBase(std::string const &name = "unconnected");
 	SocketBase(SocketBase &&other);
 	SocketBase &operator=(SocketBase &&other);
 
@@ -191,8 +192,9 @@ public:
 			{ STARTFUNC; } // }}}
 
 	// Move support.
+	Socket(std::string const &name = "unconnected") : SocketBase(name) { STARTFUNC; }
 	Socket(Socket <UserType> &&other) : SocketBase(std::move(other)) { STARTFUNC; }
-	Socket &operator=(Socket <UserType> &&other);
+	Socket &operator=(Socket <UserType> &&other) { STARTFUNC; *dynamic_cast <SocketBase *>(this) = std::move(other); return *this; }
 	// Move socket to new target class.
 	template <class OtherType> explicit Socket(Socket <OtherType> &&other, UserType *new_user);
 
@@ -258,6 +260,10 @@ public:
 	void close();
 	~ServerBase() { close(); }
 
+	// Move support.
+	ServerBase(ServerBase &&other);
+	ServerBase &operator=(ServerBase &&other);
+
 	void set_loop(Loop *loop);
 	void set_backlog(int backlog);
 }; // }}}
@@ -282,10 +288,17 @@ public:
 	// }}}
 
 	// Move support.
-	Server(Server <UserType, OwnerType> &&other);
-	Server &operator=(Server <UserType, OwnerType> &&other);
+	Server(Server <UserType, OwnerType> &&other) : ServerBase(std::move(other)) {}
+	Server &operator=(Server <UserType, OwnerType> &&other) { *dynamic_cast <ServerBase *>(this) = *dynamic_cast <ServerBase *>(other); }
 	// Move server to new target class.
-	template <class OtherUser, class OtherOwner> explicit Server(Server <OtherUser, OtherOwner> &&other, OwnerType *new_owner, CreateCb create, ClosedCb closed, ErrorCb error);
+	template <class OtherUser, class OtherOwner> explicit Server(Server <OtherUser, OtherOwner> &&other, OwnerType *new_owner, CreateCb create, ClosedCb closed, ErrorCb error) :
+		ServerBase(std::move(other))
+	{
+		owner = new_owner;
+		create_cb = create;
+		closed_cb = closed;
+		error_cb = error;
+	}
 
 	// Set callbacks.
 	void set_create_cb(CreateCb callback) { create_cb = reinterpret_cast <CreateType>(callback); }

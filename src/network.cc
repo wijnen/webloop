@@ -105,11 +105,12 @@ bool SocketBase::read_lines_impl() { // {{{
 
 void SocketBase::finish_move(SocketBase &&other) { // {{{
 	STARTFUNC;
-	*server_data = this;
-	if (other.read_handle >= 0) {
+	if (server_data != std::list <SocketBase *>::iterator())
+		*server_data = this;
+	if (other.read_handle != current_loop->invalid_io()) {
 		// Remove old read callback.
 		current_loop->remove_io(other.read_handle);
-		other.read_handle = -1;
+		other.read_handle = current_loop->invalid_io();
 		other.fd = -1;
 		other.rawread_cb = SocketBase::RawReadType();
 		other.read_cb = SocketBase::ReadType();
@@ -172,8 +173,8 @@ std::string SocketBase::recv() { // {{{
 SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
 		fd(new_fd),
 		maxsize(4096),
-		current_loop(loop),
-		read_handle(-1),
+		current_loop(Loop::get(loop)),
+		read_handle(current_loop->invalid_io()),
 		buffer(),
 		server(nullptr),
 		server_data(),
@@ -260,11 +261,31 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 	}
 } // }}}
 
+SocketBase::SocketBase(std::string const &name) : // {{{
+		fd(-1),
+		maxsize(4096),
+		current_loop(Loop::get()),
+		read_handle(current_loop->invalid_io()),
+		buffer(),
+		server(nullptr),
+		server_data(),
+		name(name),
+		user(nullptr),
+		rawread_cb(nullptr),
+		read_cb(nullptr),
+		read_lines_cb(nullptr),
+		disconnect_cb(nullptr),
+		error_cb(nullptr),
+		url()
+{
+	STARTFUNC;
+} // }}}
+
 SocketBase::SocketBase(SocketBase &&other) : // {{{
 		fd(other.fd),
 		maxsize(other.maxsize),
 		current_loop(other.current_loop),
-		read_handle(-1),
+		read_handle(current_loop->invalid_io()),
 		buffer(std::move(other.buffer)),
 		server(other.server),
 		server_data(other.server_data),
@@ -287,7 +308,7 @@ SocketBase &SocketBase::operator=(SocketBase &&other) { // {{{
 	fd = other.fd;
 	maxsize = other.maxsize;
 	current_loop = other.current_loop;
-	read_handle = -1;
+	read_handle = current_loop->invalid_io();
 	read_cb = other.read_cb;
 	buffer = std::move(other.buffer);
 	server = other.server;
@@ -426,9 +447,11 @@ std::string SocketBase::unread() { // {{{
 	@return Bytes left in the line buffer, if any.  The line buffer
 		is cleared.
 	*/
-	if (read_handle >= 0) {
+	WL_log("unreading");
+	if (read_handle != current_loop->invalid_io()) {
+		WL_log("unreading active");
 		current_loop->remove_io(read_handle);
-		read_handle = -1;
+		read_handle = current_loop->invalid_io();
 		rawread_cb = SocketBase::RawReadType();
 		read_cb = SocketBase::ReadType();
 		read_lines_cb = SocketBase::ReadLinesType();
@@ -594,6 +617,34 @@ ServerBase::ServerBase( // {{{
 	for (auto i = listeners.begin(); i != listeners.end(); ++i) {
 		i->socket.rawread(&Listener::accept_remote);
 	}
+} // }}}
+
+ServerBase::ServerBase(ServerBase &&other) : // {{{
+	listenloop(other.listenloop),
+	listeners(std::move(other.listeners)),
+	active_backlog(other.active_backlog),
+	remotes(std::move(other.remotes)),
+	owner(other.owner),
+	create_cb(other.create_cb),
+	closed_cb(other.closed_cb),
+	error_cb(other.error_cb)
+{
+	for (auto &l: listeners)
+		l.server = this;
+} // }}}
+
+ServerBase &ServerBase::operator=(ServerBase &&other) { // {{{
+	listenloop = other.listenloop;
+	listeners = std::move(other.listeners);
+	active_backlog = other.active_backlog;
+	remotes = std::move(other.remotes);
+	owner = other.owner;
+	create_cb = other.create_cb;
+	closed_cb = other.closed_cb;
+	error_cb = other.error_cb;
+	for (auto &l: listeners)
+		l.server = this;
+	return *this;
 } // }}}
 
 void ServerBase::close() { // {{{
