@@ -28,17 +28,28 @@ class WebString;
 class WebVector;
 class WebMap;
 
+static constexpr int make_object_type(char const id[4]) { return (id[3] << 24) | (id[2] << 16) | (id[1] << 8) | id[0]; }
+
 class WebObject { // {{{
 public:		// Types
-	enum Type { NONE, BOOL, INT, FLOAT, STRING, VECTOR, MAP };
+	// Default types all end with '\0'. Libraries should not do that, and
+	// use a library-specific prefix. All 4-byte strings following those
+	// rules are allowed.
+	static int const NONE = make_object_type("NIL\0");
+	static int const BOOL = make_object_type("T/F\0");
+	static int const INT = make_object_type("INT\0");
+	static int const FLOAT = make_object_type("FLT\0");
+	static int const STRING = make_object_type("STR\0");
+	static int const VECTOR = make_object_type("VEC\0");
+	static int const MAP = make_object_type("MAP\0");
 	typedef std::vector <std::shared_ptr <WebObject> > VectorType;
 	typedef std::map <std::string, std::shared_ptr <WebObject> > MapType;
 	typedef int64_t IntType;
 	typedef double FloatType;
 private:	// Data members
-	Type const type;
+	int const type;
 public:		// Member functions
-	WebObject(Type type) : type(type) {}
+	WebObject(int type) : type(type) {}
 
 	WebNone *as_none() { assert(type == NONE); return reinterpret_cast <WebNone *>(this); }
 	WebBool *as_bool() { assert(type == BOOL); return reinterpret_cast <WebBool *>(this); }
@@ -47,18 +58,19 @@ public:		// Member functions
 	WebString *as_string() { assert(type == STRING); return reinterpret_cast <WebString *>(this); }
 	WebVector *as_vector() { assert(type == VECTOR); return reinterpret_cast <WebVector *>(this); }
 	WebMap *as_map() { assert(type == MAP); return reinterpret_cast <WebMap *>(this); }
+	template <class T> T *as() { assert(type == T::object_type); return reinterpret_cast <T *>(this); }
 
 	WebObject &operator=(WebObject const &other) = delete;
 	WebObject(WebObject const &other) : type(other.type) {}
 	WebObject(WebObject &&other) : type(other.type) {}
 	virtual ~WebObject() {}
-	constexpr Type get_type() const { return type; }
+	constexpr int get_type() const { return type; }
 
 	// Deep copy; this makes a copy of the derived class, returns a new() WebObject.
 	virtual std::shared_ptr <WebObject> copy() const = 0;
 
 	// Serialization.
-	virtual std::string dump() const = 0;
+	virtual std::string dump() const { throw "Attempt to serialize invalid object"; };
 	virtual std::string print() const = 0;
 	static std::shared_ptr <WebObject> load(std::string const &data);
 	friend std::ostream &operator<<(std::ostream &s, WebObject const &o) { s << o.print(); return s; }
@@ -73,17 +85,19 @@ class WebHelper { // {{{
 public:
 	inline WebHelper();
 	inline WebHelper(bool src);
-	inline WebHelper(WebObject::IntType src);
-	inline WebHelper(WebObject::FloatType src);
+	inline WebHelper(int8_t src);
+	inline WebHelper(int16_t src);
+	inline WebHelper(int32_t src);
+	inline WebHelper(int64_t src);
+	inline WebHelper(uint8_t src);
+	inline WebHelper(uint16_t src);
+	inline WebHelper(uint32_t src);
+	inline WebHelper(uint64_t src);
+	inline WebHelper(float src);
+	inline WebHelper(double src);
 	inline WebHelper(char const *src);
 	inline WebHelper(std::string const &src);
-	inline WebHelper(std::shared_ptr <WebNone> src);
-	inline WebHelper(std::shared_ptr <WebBool> src);
-	inline WebHelper(std::shared_ptr <WebInt> src);
-	inline WebHelper(std::shared_ptr <WebFloat> src);
-	inline WebHelper(std::shared_ptr <WebString> src);
-	inline WebHelper(std::shared_ptr <WebVector> src);
-	inline WebHelper(std::shared_ptr <WebMap> src);
+	template <class T> inline WebHelper(std::shared_ptr <T> src);
 	WebHelper(std::shared_ptr <WebObject> src) : data (src) {}
 	operator std::shared_ptr <WebObject>() const { return data; }
 }; // }}}
@@ -95,6 +109,7 @@ class WebNone : public WebObject { // {{{
 #endif
 	static std::shared_ptr <WebNone> instance; // While it is allowed to construct more of them, create() will always return this one.
 public:
+	static int const type = NONE;
 	WebNone() : WebObject(NONE) {}
 	static std::shared_ptr <WebNone> create() { return instance; }
 	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebNone()); }
@@ -115,6 +130,7 @@ class WebBool : public WebObject { // {{{
 	void load_impl(std::string const &data) override { assert(data.length() == 1); }
 #endif
 public:
+	static int const type = BOOL;
 	WebBool() : WebObject(BOOL), value(false) {}
 	WebBool(bool value) : WebObject(BOOL), value(value) {}
 	static std::shared_ptr <WebBool> create(bool value) { return std::shared_ptr <WebBool> (new WebBool(value)); }
@@ -142,6 +158,7 @@ class WebInt : public WebObject { // {{{
 	}
 #endif
 public:
+	static int const type = INT;
 	WebInt() : WebObject(INT), value() {}
 	WebInt(IntType value) : WebObject(INT), value(value) {}
 	static std::shared_ptr <WebInt> create(IntType value) { return std::shared_ptr <WebInt> (new WebInt(value)); }
@@ -162,6 +179,7 @@ class WebFloat : public WebObject { // {{{
 	void load_impl(std::string const &data) override;
 #endif
 public:
+	static int const type = FLOAT;
 	std::string dump() const override;
 	std::string print() const override { return (std::ostringstream() << value).str(); }
 	WebFloat() : WebObject(FLOAT), value() {}
@@ -178,6 +196,7 @@ class WebString : public WebObject { // {{{
 	void load_impl(std::string const &data) override { value = data.substr(1); }
 #endif
 public:
+	static int const type = STRING;
 	std::string dump() const override;
 	std::string print() const override { return "\"" + value + "\""; }
 	WebString() : WebObject(STRING), value() {}
@@ -195,6 +214,7 @@ class WebVector : public WebObject { // {{{
 	void load_impl(std::string const &data) override;
 #endif
 public:
+	static int const type = VECTOR;
 	std::string dump() const override;
 	std::string print() const override;
 	WebVector() : WebObject(VECTOR), value() {}
@@ -223,6 +243,7 @@ class WebMap : public WebObject { // {{{
 	void load_impl(std::string const &data) override;
 #endif
 public:
+	static int const type = MAP;
 	std::string dump() const override;
 	std::string print() const override;
 	WebMap() : WebObject(MAP), value() {}
@@ -242,17 +263,19 @@ public:
 // WebHelper constructors. {{{
 WebHelper::WebHelper() : data(dynamic_pointer_cast <WebObject> (WebNone::create())) {}
 WebHelper::WebHelper(bool src) : data(dynamic_pointer_cast <WebObject> (WebBool::create(src))) {}
-WebHelper::WebHelper(WebObject::IntType src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
-WebHelper::WebHelper(WebObject::FloatType src) : data(dynamic_pointer_cast <WebObject> (WebFloat::create(src))) {}
+WebHelper::WebHelper(int8_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(int16_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(int32_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(int64_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(uint8_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(uint16_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(uint32_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(uint64_t src) : data(dynamic_pointer_cast <WebObject> (WebInt::create(src))) {}
+WebHelper::WebHelper(float src) : data(dynamic_pointer_cast <WebObject> (WebFloat::create(src))) {}
+WebHelper::WebHelper(double src) : data(dynamic_pointer_cast <WebObject> (WebFloat::create(src))) {}
 WebHelper::WebHelper(char const *src) : data(dynamic_pointer_cast <WebObject> (WebString::create(src))) {}
 WebHelper::WebHelper(std::string const &src) : data(dynamic_pointer_cast <WebObject> (WebString::create(src))) {}
-WebHelper::WebHelper(std::shared_ptr <WebNone> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebBool> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebInt> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebFloat> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebString> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebVector> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
-WebHelper::WebHelper(std::shared_ptr <WebMap> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
+template <class T> WebHelper::WebHelper(std::shared_ptr <T> src) : data(dynamic_pointer_cast <WebObject> (src)) {}
 // }}}
 
 // Literals for base types. These can only be used with "using namespace Webloop".
