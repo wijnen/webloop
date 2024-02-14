@@ -103,7 +103,6 @@ public:
 	typedef void (UserType::*ErrorCb)(std::string const &message);
 private:
 	// Main class implementing the websocket protocol.
-	Socket <Websocket <UserType> > socket;
 	std::string buffer;
 	std::string fragments;
 	Loop::TimeoutHandle keepalive_handle;
@@ -134,6 +133,10 @@ public:
 	ConnectSettings connect_settings;
 	RunSettings run_settings;
 	std::map <std::string, std::string> received_headers;	// Headers that are received from server. (Only for accepted websockets.)
+private:
+	// Make this the last member, so all other members are initialized before it.
+	Socket <Websocket <UserType> > socket;
+public:
 	void disconnect(bool send_to_websocket = true);
 	Websocket();
 	Websocket(std::string const &address, ConnectSettings const &connect_settings = {}, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
@@ -177,7 +180,6 @@ void Websocket <UserType>::disconnect(bool send_to_websocket) { // {{{
 
 template <class UserType>
 Websocket <UserType>::Websocket() : // {{{
-	socket(),
 	buffer(),
 	fragments(),
 	keepalive_handle(),
@@ -191,14 +193,15 @@ Websocket <UserType>::Websocket() : // {{{
 	error_cb(),
 	connect_settings(),
 	run_settings(),
-	received_headers()
+	received_headers(),
+	socket()
 {
+	buffer += "";
 	STARTFUNC;
 } // }}}
 
 template <class UserType>
 Websocket <UserType>::Websocket(std::string const &address, ConnectSettings const &connect_settings, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
-	socket("websocket to " + address, address, this),
 	buffer(),
 	fragments(),
 	keepalive_handle(),
@@ -212,9 +215,11 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 	error_cb(),
 	connect_settings(connect_settings),
 	run_settings(run_settings),
-	received_headers()
+	received_headers(),
+	socket("websocket to " + address, address, this)
 {
 	STARTFUNC;
+	buffer += "";
 	/* When constructing a Websocket, a connection is made to the
 	requested port, and the websocket handshake is performed.  This
 	constructor passes any extra arguments to the network.Socket
@@ -362,7 +367,6 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 
 template <class UserType>
 Websocket <UserType>::Websocket(int socket_fd, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
-	socket(socket_fd, this),
 	buffer(),
 	fragments(),
 	keepalive_handle(),
@@ -376,9 +380,11 @@ Websocket <UserType>::Websocket(int socket_fd, UserType *user, Receiver receiver
 	error_cb(),
 	connect_settings(),
 	run_settings(run_settings),
-	received_headers()
+	received_headers(),
+	socket(socket_fd, this)
 {
 	STARTFUNC;
+	buffer += "";
 	/* When constructing a Websocket, a connection is made to the
 	requested port, and the websocket handshake is performed.  This
 	constructor passes any extra arguments to the network.Socket
@@ -430,7 +436,6 @@ Websocket <UserType>::Websocket(int socket_fd, UserType *user, Receiver receiver
 
 template <class UserType> template <class ServerType>
 Websocket <UserType>::Websocket(Socket <ServerType> &&src, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
-	socket(std::move(src), this),
 	buffer(),
 	fragments(),
 	keepalive_handle(),
@@ -444,9 +449,11 @@ Websocket <UserType>::Websocket(Socket <ServerType> &&src, UserType *user, Recei
 	error_cb(),
 	connect_settings(),
 	run_settings(run_settings),
-	received_headers()
+	received_headers(),
+	socket(std::move(src), this)
 {
 	STARTFUNC;
+	buffer += "";
 	// Set up keepalive heartbeat.
 	if (run_settings.keepalive != Loop::Duration()) {
 		Loop *loop = Loop::get(run_settings.loop);
@@ -461,7 +468,6 @@ Websocket <UserType>::Websocket(Socket <ServerType> &&src, UserType *user, Recei
 
 template <class UserType>
 Websocket <UserType>::Websocket(Websocket <UserType> &&other) : // {{{
-	socket(std::move(other)),
 	buffer(std::move(other.buffer)),
 	fragments(std::move(other.fragments)),
 	keepalive_handle(),
@@ -475,8 +481,14 @@ Websocket <UserType>::Websocket(Websocket <UserType> &&other) : // {{{
 	error_cb(other.error_cb),
 	connect_settings(other.connect_settings),
 	run_settings(other.run_settings),
-	received_headers(std::move(other.received_headers))
+	received_headers(std::move(other.received_headers)),
+	socket(std::move(other))
 {
+	other.buffer.clear();
+	buffer += "";
+	other.fragments.clear();
+	other.received_headers.clear();
+	WL_log("buffer moved");
 	if (!other.is_closed) {
 		if (run_settings.keepalive != Loop::Duration()) {
 			Loop::get(other.run_settings.loop)->remove_timeout(other.keepalive_handle);
@@ -493,8 +505,12 @@ template <class UserType>
 Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&other) { // {{{
 	disconnect();
 	socket = std::move(other.socket);
+	WL_log("moving buffer");
 	buffer = std::move(other.buffer);
+	other.buffer.clear();
+	buffer += "";
 	fragments = std::move(other.fragments);
+	other.fragments.clear();
 	is_closed = other.is_closed;
 	pong_seen = other.pong_seen;
 	current_opcode = other.current_opcode;
@@ -506,6 +522,7 @@ Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&oth
 	connect_settings = other.connect_settings;
 	run_settings = other.run_settings;
 	received_headers = std::move(other.received_headers);
+	other.received_headers.clear();
 	if (!other.is_closed) {
 		if (run_settings.keepalive != Loop::Duration()) {
 			Loop::get(other.run_settings.loop)->remove_timeout(other.keepalive_handle);
@@ -554,6 +571,7 @@ void Websocket <UserType>::inject(std::string &data) { // {{{
 		//WL_log(std::format("waiting: ' + ' '.join(['%02x' % x for x in self.websocket_buffer]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in self.websocket_buffer]))
 		//WL_log('data: ' + ' '.join(['%02x' % x for x in data]) + ''.join([chr(x) if 32 <= x < 127 else '.' for x in data]))
 	}
+	WL_log("moving buffer");
 	buffer += std::move(data);
 	data.clear();
 	while (!buffer.empty()) {
@@ -641,6 +659,7 @@ void Websocket <UserType>::inject(std::string &data) { // {{{
 			packet = buffer.substr(pos, len);
 		}
 		buffer = buffer.substr(pos + len);
+		buffer += "";
 		if (current_opcode == uint8_t(-1))
 			current_opcode = opcode;
 		else if (opcode != 0) {

@@ -188,6 +188,7 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 		url(address)
 {
 	STARTFUNC;
+	WL_log("name " + name);
 	/* Create a connection.
 	@param address: connection target.  This is a unix domain
 	socket if there is a / in it.  If it is not a unix domain
@@ -279,6 +280,7 @@ SocketBase::SocketBase(std::string const &name) : // {{{
 		url()
 {
 	STARTFUNC;
+	WL_log("name " + name);
 } // }}}
 
 SocketBase::SocketBase(SocketBase &&other) : // {{{
@@ -299,6 +301,7 @@ SocketBase::SocketBase(SocketBase &&other) : // {{{
 		url(std::move(other.url))
 {
 	STARTFUNC;
+	WL_log("name " + name);
 	finish_move(std::move(other));
 } // }}}
 
