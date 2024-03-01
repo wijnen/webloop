@@ -195,6 +195,7 @@ public:
 	Socket(std::string const &name = "unconnected") : SocketBase(name) { STARTFUNC; }
 	Socket(Socket <UserType> &&other) : SocketBase(std::move(other)) { STARTFUNC; }
 	Socket &operator=(Socket <UserType> &&other) { STARTFUNC; *dynamic_cast <SocketBase *>(this) = std::move(other); return *this; }
+	void update_user(UserType *new_user) { user = reinterpret_cast <UserBase *>(new_user); }
 	// Move socket to new target class.
 	template <class OtherType> explicit Socket(Socket <OtherType> &&other, UserType *new_user);
 

@@ -39,14 +39,15 @@ int Loop::PollItems::add(IoRecord const &item) { // {{{
 		assert(ret == items.size());
 		items.push_back(item);
 	}
-	WL_log("adding loop item " + std::to_string(ret));
+	if (DEBUG > 3)
+		WL_log("adding loop item @" + std::to_string(uint64_t((void *)item.object)) + ": " + std::to_string(ret));
 	return ret;
 } // }}}
 
 void Loop::PollItems::remove(int index) { // {{{
 	// Remove fd using index as returned by add.
 	STARTFUNC;
-	//if (DEBUG > 3)
+	if (DEBUG > 3)
 		WL_log("removing loop item " + std::to_string(index));
 	assert(index >= 0);
 	assert(data[index].fd >= 0);
@@ -163,7 +164,7 @@ void Loop::run() { // {{{
 	running = true;
 	aborting = false;
 	while (running) {
-		//if (DEBUG > 4)
+		if (DEBUG > 4)
 			WL_log("running, items = " + items.print());
 		iteration(idle.empty());
 		if (!running)

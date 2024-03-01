@@ -1,6 +1,7 @@
 #ifndef _LOOP_HH
 #define _LOOP_HH
 
+#include <iostream>
 #include <set>
 #include <list>
 #include <vector>

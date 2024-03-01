@@ -108,6 +108,7 @@ void SocketBase::finish_move(SocketBase &&other) { // {{{
 	if (server_data != std::list <SocketBase *>::iterator())
 		*server_data = this;
 	if (other.read_handle != current_loop->invalid_io()) {
+		//WL_log("resetting callback");
 		// Remove old read callback.
 		current_loop->remove_io(other.read_handle);
 		other.read_handle = current_loop->invalid_io();
@@ -129,6 +130,8 @@ void SocketBase::finish_move(SocketBase &&other) { // {{{
 
 		read_handle = current_loop->add_io(Loop::IoRecord(name, this, fd, POLLIN | POLLPRI, read, CbType(), &SocketBase::error_impl));
 	}
+	//else
+		//WL_log("not resetting callback");
 } // }}}
 
 std::string SocketBase::recv() { // {{{
@@ -160,7 +163,8 @@ std::string SocketBase::recv() { // {{{
 	if (num == 0) {
 		bool have_server = server;
 		std::string ret = close();
-		std::cerr << "closed" << std::endl;
+		if (DEBUG > 3)
+			WL_log("closed");
 		if (!disconnect_cb && !have_server)
 			throw "network connection closed";
 		return ret;
@@ -188,7 +192,7 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 		url(address)
 {
 	STARTFUNC;
-	WL_log("name " + name);
+	//WL_log("name " + name);
 	/* Create a connection.
 	@param address: connection target.  This is a unix domain
 	socket if there is a / in it.  If it is not a unix domain
@@ -201,7 +205,7 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 	if (fd >= 0)
 		return;
 
-	WL_log("connecting to " + url.print());
+	//WL_log("connecting to " + url.print());
 
 	if (url.unix.empty() && url.service.empty()) {
 		url.service = std::move(url.host);
@@ -280,7 +284,7 @@ SocketBase::SocketBase(std::string const &name) : // {{{
 		url()
 {
 	STARTFUNC;
-	WL_log("name " + name);
+	//WL_log("name " + name);
 } // }}}
 
 SocketBase::SocketBase(SocketBase &&other) : // {{{
@@ -301,7 +305,7 @@ SocketBase::SocketBase(SocketBase &&other) : // {{{
 		url(std::move(other.url))
 {
 	STARTFUNC;
-	WL_log("name " + name);
+	//WL_log("name " + name);
 	finish_move(std::move(other));
 } // }}}
 
@@ -450,9 +454,9 @@ std::string SocketBase::unread() { // {{{
 	@return Bytes left in the line buffer, if any.  The line buffer
 		is cleared.
 	*/
-	WL_log("unreading");
+	//WL_log("unreading");
 	if (read_handle != current_loop->invalid_io()) {
-		WL_log("unreading active");
+		//WL_log("unreading active");
 		current_loop->remove_io(read_handle);
 		read_handle = current_loop->invalid_io();
 		rawread_cb = SocketBase::RawReadType();
