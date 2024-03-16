@@ -1,9 +1,11 @@
-#include "webloop/fhs.hh"
+#include "webloop.hh"
+
+using namespace Webloop;
 
 int main(int argc, char **argv) {
 	(void)&argc;
-	Webloop::init(argv, "fhs test", "0.1", "Bas Wijnen <wijnen@debian.org>");
-	auto dirs = Webloop::read_data_names("html", {}, true, true);
+	init(argv, "fhs test", "0.1", "Bas Wijnen <wijnen@debian.org>");
+	auto dirs = read_data_names("html", {}, true, true);
 	for (auto d: dirs) {
 		std::cerr << "dir: " << d << std::endl;
 	}

@@ -6,6 +6,7 @@ namespace Webloop {
 
 std::shared_ptr <WebNone> WebNone::instance = std::shared_ptr <WebNone>(new WebNone());
 
+// Print and dump for default object types. {{{
 std::string WebFloat::dump() const { // {{{
 #ifdef WEBOBJECT_DUMPS_JSON
 	if (std::isnan(value))
@@ -436,6 +437,47 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 	return std::shared_ptr <WebObject> (ret);
 } // }}}
 #endif
+// }}}
+
+// Operators. {{{
+uint64_t constexpr make_type_key(int lhs, int rhs) { return ((uint64_t)lhs << 32) | rhs; }
+
+std::shared_ptr <WebObject> binary_int(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op) { // {{{
+	WebObject::IntType l = *lhs->as_int();
+	WebObject::IntType r = *rhs->as_int();
+	switch (op) {
+	case '+':
+		return WebInt::create(l + r);
+	case '-':
+		return WebInt::create(l - r);
+	case '*':
+		return WebInt::create(l * r);
+	case '/':
+		return WebFloat::create(l / r);
+	case '%':
+		return WebInt::create(l % r);
+	}
+	throw "unknown operator called on int type";
+} // }}}
+
+std::map <uint64_t, WebObject::binary_operator_impl> WebObject::binary_operator_registry = { // {{{
+	{make_type_key(INT, INT), binary_int}
+}; // }}}
+
+void WebObject::register_binary_operators(int lhs_type, int rhs_type, binary_operator_impl impl) { // {{{
+	binary_operator_registry.insert({make_type_key(lhs_type, rhs_type), impl});
+} // }}}
+
+std::shared_ptr <WebObject> binary_operator(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op) { // {{{
+	auto it = WebObject::binary_operator_registry.find(make_type_key(lhs->get_type(), rhs->get_type()));
+	if (it == WebObject::binary_operator_registry.end())
+		throw "calling undefined operator";
+	return it->second(lhs, rhs, op);
+} // }}}
+
+std::shared_ptr <WebObject> operator+(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs) { return binary_operator(lhs, rhs, '+'); }
+
+// }}}
 
 }
 

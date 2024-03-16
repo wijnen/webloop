@@ -78,7 +78,16 @@ private:
 #ifndef WEBOBJECT_DUMPS_JSON
 	virtual void load_impl(std::string const &data) = 0;
 #endif
+	typedef std::shared_ptr <WebObject> (*binary_operator_impl)(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op);
+	static std::map <uint64_t, binary_operator_impl> binary_operator_registry;
+	friend std::shared_ptr <WebObject> binary_operator(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op);
+protected:
+	static void register_binary_operators(int lhs_type, int rhs_type, binary_operator_impl impl);
 }; // }}}
+
+// WebObject operators. {{{
+std::shared_ptr <WebObject> operator+(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs);
+// }}}
 
 class WebHelper { // {{{
 	std::shared_ptr <WebObject> data;
@@ -299,6 +308,122 @@ template <typename... Ts> inline std::shared_ptr <WebVector> WV(Ts... args) { re
 
 // Short form to create a WebMap.
 template <typename... Ts> inline std::shared_ptr <WebMap> WM(Ts... args) { return WebMap::build({args...}); }
+
+// These classes are used to store functions in WebObject structures. These cannot be serialized. {{{
+
+// This class contains a pointer to a regular (non-member) function.
+class WebFunction : public WebObject { // {{{
+private:
+	typedef std::shared_ptr <WebObject> (*Target)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+	Target target;
+public:
+	static int const object_type = make_object_type("FUN\0");
+
+	// Parts that are needed for WebObject.
+public:
+	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebFunction(target)); }
+	std::string print() const override { return "C++ Function wrapper"; }
+
+	// Construction
+	WebFunction(Target t) : WebObject(object_type), target(t) {}
+
+	// Call
+	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { return target(args, kwargs); }
+
+}; // }}}
+
+// This class contains a pointer to a regular (non-member) function (coroutine style).
+class WebCoroutine : public WebObject { // {{{
+private:
+	typedef coroutine (*Target)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+	Target target;
+public:
+	static int const object_type = make_object_type("COR\0");
+
+	// Parts that are needed for WebObject.
+public:
+	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebCoroutine(target)); }
+	std::string print() const override { return "C++ Coroutine Function wrapper"; }
+
+	// Construction
+	WebCoroutine(Target t) : WebObject(object_type), target(t) {}
+
+	// Call
+	coroutine operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { return target(args, kwargs); }
+
+}; // }}}
+
+// This is the fake base class for member function call objects.
+class MemberOwner {};
+
+// This class contains a pointer to a member function.
+class WebMemberBase : public WebObject { // {{{
+private:
+	typedef std::shared_ptr <WebObject> (CBase::*Target)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+protected:
+	CBase *object;
+private:
+	Target target;
+public:
+	static int const object_type = make_object_type("MEM\0");
+
+	// Parts that are needed for WebObject.
+public:
+	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebMemberBase(object, target)); }
+	std::string print() const override { return "C++ Member Function wrapper"; }
+
+	// Construction
+protected:
+	WebMemberBase(CBase *o, Target t) : WebObject(object_type), object(o), target(t) {}
+
+	// Call
+public:
+	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { return (object->*target)(args, kwargs); }
+
+}; // }}}
+
+// This is the constructor class for WebMemberBase, which forces the base object and the pointer to be for the same class.
+template <class Base>
+class WebMember : public WebMemberBase { // {{{
+public:
+	typedef std::shared_ptr <WebObject> (Base::*RealTarget)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+	WebMember(Base *o, RealTarget t) : WebMemberBase(reinterpret_cast <CBase *>(o), reinterpret_cast <Target>(t)) {}
+}; // }}}
+
+// This class contains a pointer to a coroutine member function.
+class WebCoroutineMemberBase : public WebObject { // {{{
+private:
+	typedef coroutine (CBase::*Target)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+protected:
+	CBase *object;
+private:
+	Target target;
+public:
+	static int const object_type = make_object_type("COM\0");
+
+	// Parts that are needed for WebObject.
+public:
+	std::shared_ptr <WebObject> copy() const override { return std::shared_ptr <WebObject> (new WebCoroutineMemberBase(object, target)); }
+	std::string print() const override { return "C++ Coroutine Member Function wrapper"; }
+
+	// Construction
+protected:
+	WebCoroutineMemberBase(CBase *o, Target t) : WebObject(object_type), object(o), target(t) {}
+
+	// Call
+public:
+	coroutine operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { return (object->*target)(args, kwargs); }
+
+}; // }}}
+
+// This is the constructor class for WebCoroutineMemberBase, which forces the base object and the pointer to be for the same class.
+template <class Base>
+class WebCoroutineMember : public WebCoroutineMemberBase { // {{{
+public:
+	typedef std::shared_ptr <WebObject> (Base::*RealTarget)(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+	WebCoroutineMember(Base *o, RealTarget t) : WebCoroutineMemberBase(reinterpret_cast <CBase *>(o), reinterpret_cast <Target>(t)) {}
+}; // }}}
+// }}}
 
 }
 
