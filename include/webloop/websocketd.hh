@@ -16,58 +16,16 @@
 #ifndef _WEBSOCKETD_HH
 #define _WEBSOCKETD_HH
 
-/* Documentation. {{{
-'''@mainpage
-This module can be used to create websockets servers and clients.  A websocket
-client is an HTTP connection which uses the headers to initiate a protocol
-change.  The server is a web server which serves web pages, and also responds
-to the protocol change headers that clients can use to set up a websocket.
+/** @file {{{
+This file defines 3 template classes:
+- Websocket, for http connections that use the Websocket protocol.
+- Httpd, for Http servers that allow Websockets to be served (as well as static and dynamic pages).
+- RPC, for Websockets that are used with a protocol to make remote procedure calls.
 
-Note that the server is not optimized for high traffic.  If you need that, use
+Note that Httpd is not optimized for high traffic. If you need that, use
 something like Apache to handle all the other content and set up a virtual
 proxy to this server just for the websocket.
-
-In addition to implementing the protocol, this module contains a simple system
-to use websockets for making remote procedure calls (RPC).  This system allows
-the called procedures to be generators, so they can yield control to the main
-program and continue running when they need to.  This system can also be used
-locally by using call().
-'''
-
-'''@file
-This module can be used to create websockets servers and clients.  A websocket
-client is an HTTP connection which uses the headers to initiate a protocol
-change.  The server is a web server which serves web pages, and also responds
-to the protocol change headers that clients can use to set up a websocket.
-
-Note that the server is not optimized for high traffic.  If you need that, use
-something like Apache to handle all the other content and set up a virtual
-proxy to this server just for the websocket.
-
-In addition to implementing the protocol, this module contains a simple system
-to use websockets for making remote procedure calls (RPC).  This system allows
-the called procedures to be generators, so they can yield control to the main
-program and continue running when they need to.  This system can also be used
-locally by using call().
-'''
-
-'''@package websocketd Client WebSockets and webserver with WebSockets support
-This module can be used to create websockets servers and clients.  A websocket
-client is an HTTP connection which uses the headers to initiate a protocol
-change.  The server is a web server which serves web pages, and also responds
-to the protocol change headers that clients can use to set up a websocket.
-
-Note that the server is not optimized for high traffic.  If you need that, use
-something like Apache to handle all the other content and set up a virtual
-proxy to this server just for the websocket.
-
-In addition to implementing the protocol, this module contains a simple system
-to use websockets for making remote procedure calls (RPC).  This system allows
-the called procedures to be generators, so they can yield control to the main
-program and continue running when they need to.  This system can also be used
-locally by using call().
-'''
-# }}} */
+}}} */
 
 // includes.  {{{
 #include <string>
@@ -88,78 +46,128 @@ locally by using call().
 
 namespace Webloop {
 
+/// This type is used for function arguments in RPC calls.
 typedef std::shared_ptr <WebVector> Args;
+
+/// This type is used for keyword function arguments in RPC calls.
 typedef std::shared_ptr <WebMap> KwArgs;
 
-// Http response codes.
+/// Http response codes.
 extern std::map <int, char const *> http_response;
 
 // Websockets. {{{
+/// This class implements the Websocket protocol over a Webloop::Socket object.
 template <class UserType>
 class Websocket { // {{{
 public:
+	/// This is the function signature for the callback to inform the owner of a new packet.
 	typedef void (UserType::*Receiver)(std::string const &data);
+
+	/// This is the function signature for the callback to inform the owner that the connection is lost.
 	typedef void (UserType::*DisconnectCb)();
+
+	/// This is the function signature for the callback to inform the owner that there was an error.
 	typedef void (UserType::*ErrorCb)(std::string const &message);
 private:
-	// Main class implementing the websocket protocol.
-	std::string buffer;
-	std::string fragments;
+	std::string buffer;	// Data that is currently being received.
+	std::string fragments;	// Fragments for packet that is being received; data is added to it when new packets arrive.
 	Loop::TimeoutHandle keepalive_handle;
-	bool is_closed;
-	bool pong_seen;	// true if a pong was seen since last ping command.
+	bool is_closed;		// true if the connection is not open.
+	bool pong_seen;		// true if a pong was seen since last ping command.
 	uint8_t current_opcode;
-	Receiver receiver;
+	Receiver receiver;	// callback for new data packets.
 	bool send_mask;		// whether masks are used to sent data (true for client, false for server).
-	UserType *user;				// callback functions are called on this object.
+	UserType *user;		// callback functions are called on this object.
 	DisconnectCb disconnect_cb;
 	ErrorCb error_cb;
 	void inject(std::string &data);	// Make the class handle incoming data.
 	void disconnect_impl() { if (disconnect_cb != nullptr) (user->*disconnect_cb)(); else WL_log("disconnect"); }
-	void error_impl(std::string const &message) { if (error_cb != nullptr) (user->*error_cb)(message); else WL_log("error"); }
+	void error_impl(std::string const &message) { if (error_cb != nullptr) (user->*error_cb)(message); else WL_log("error: " + message); }
+	enum HttpState { HTTP_START, HTTP_HEADER, HTTP_DONE };
+	HttpState http_state;
+	void recv_http(std::string &hdrdata);	// Receive http headers and non-websocket body data.
 public:
-	// Settings for connecting (ignored for accepted websockets).
+	/// Settings that are only used for connecting websockets.
 	struct ConnectSettings {
 		std::string method;				// default: GET
 		std::string user;				// login name; if both this and password are empty: don't send them.
 		std::string password;				// login password
 		std::map <std::string, std::string> sent_headers;	// extra headers, sent to server.
+		ConnectSettings(std::string const &method = "GET", std::string const &user = {}, std::string const &password = {}, std::map <std::string, std::string> const &sent_headers = {}) : method(method), user(user), password(password), sent_headers(sent_headers) {}
 	};
-	// Settings used for all websockets (both connected and accepted).
+	/// Settings used for all websockets (both connecting and accepted).
 	struct RunSettings {
 		Loop *loop;					// Main loop to use; usually nullptr, so the default is used.
 		Loop::Duration keepalive;			// keepalive timer.
 	};
+	/// Connection settings; not used for websockets that are accepted through Httpd.
 	ConnectSettings connect_settings;
+	/// Settings that are used by all websockets (both connecting and accepted).
 	RunSettings run_settings;
+
+	/// For accepted websockets only: Http headers that were received from the browser.
 	std::map <std::string, std::string> received_headers;	// Headers that are received from server. (Only for accepted websockets.)
 private:
 	// Make this the last member, so all other members are initialized before it.
 	Socket <Websocket <UserType> > socket;
+
+	// Internal callback for keepalive pings.
+	bool keepalive();
 public:
+	/// Disconnect this websocket.
 	void disconnect(bool send_to_websocket = true);
+
+	/// Constructor. This is mostly usefor to assign a connected websocket to the object later.
 	Websocket();
+
+	/// Constructor for a websocket that connects to a server.
 	Websocket(std::string const &address, ConnectSettings const &connect_settings = {}, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
-	Websocket(int socket_fd, UserType *user = nullptr, Receiver receiver = {}, RunSettings const &run_settings = {});
+
+	/// Constructor for a (possibly fake) websocket that is constructed around an already open file descriptor.
+	Websocket(int socket_fd, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
+
+	/// Constructor for a websocket that was accepted by a server.
 	template <class ServerType>
 	Websocket(Socket <ServerType> &&src, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
-	// Websocket move constructor and assignment.
+
+	/// Websocket move constructor.
 	Websocket(Websocket <UserType> &&src);
+	/// Websocket move assignment.
 	Websocket <UserType> &operator=(Websocket <UserType> &&src);
+
+	/// Set a new user object (of the same type as the old one) on the websocket.
 	void update_user(UserType *new_user) { user = new_user; }
-	// Destructor.
+
+	/// Destructor.
 	~Websocket() { disconnect(); }
+
 	// Set callbacks.
+	/// Register callback that is called when the websocket is disconnected.
 	void set_disconnect_cb(DisconnectCb callback) { disconnect_cb = callback; }
+
+	/// Register callback that is called when the websocket encounters an error.
 	void set_error_cb(ErrorCb callback) { error_cb = callback; }
 
-	bool keepalive();
+	/// Register callback that is called when the websocket receives a data packet.
+	void set_receiver(Receiver callback) { receiver = callback; }
+
+	/// Send a data frame.
 	void send(std::string const &data, int opcode = 1); // Send a WebSocket frame.
-	bool ping(std::string const &data = std::string()); // Send a ping; return False if no pong was seen for previous ping.  Other received packets also count as a pong.
+
+	/// Send a ping frame.
+	/// @Returns: true if a pong was received since previous ping was sent; false if not.
+	bool ping(std::string const &data = std::string());
+
+	/// Query connection state.
+	/// @Returns: false if socket is open, true if not.
 	bool closed() const { return is_closed; }
 
-	// Get and set socket name.
+	/// Get the socket name (for debugging).
+	/// @Returns: The socket name.
 	constexpr std::string const &get_name() const { return socket.get_name(); }
+
+	/// Set the socket name (for debugging).
+	/// @param n: New socket name.
 	void set_name(std::string const &n) { socket.set_name(n); }
 }; // }}}
 
@@ -199,6 +207,70 @@ Websocket <UserType>::Websocket() : // {{{
 {
 	STARTFUNC;
 } // }}}
+
+template <class UserType>
+void Websocket <UserType>::recv_http(std::string &hdrdata) {
+	switch (http_state) {
+	case HTTP_START:
+	{
+		std::string::size_type pos = hdrdata.find("\n");
+		if (pos == std::string::npos)
+			return;
+		std::istringstream firstline(hdrdata.substr(0, pos));
+		std::string namecode;
+		int numcode;
+		firstline >> namecode >> numcode;
+		if (numcode != 101) {
+			WL_log("Unexpected reply: " + hdrdata);
+			throw "wrong reply code";
+		}
+		hdrdata = hdrdata.substr(pos + 1);
+		http_state = HTTP_HEADER;
+	}
+		// Fall through.
+	case HTTP_HEADER:
+	{
+		while (true) {
+			std::string::size_type pos = hdrdata.find("\n");
+			if (pos == std::string::npos)
+				return;
+			std::string line = hdrdata.substr(0, pos);
+			hdrdata = hdrdata.substr(pos + 1);
+			if (strip(line).empty())
+				break;
+			if (DEBUG > 2)
+				WL_log("Header: " + line);
+			std::string::size_type sep = line.find(":");
+			if (sep == std::string::npos) {
+				WL_log("invalid header line");
+				throw "invalid header line";
+			}
+			std::string key = line.substr(0, sep);
+			std::string value = line.substr(sep + 1);
+			received_headers[strip(key)] = strip(value);
+			continue;
+		}
+		is_closed = false;
+		socket.read(&Websocket <UserType>::inject);
+		socket.set_disconnect_cb(&Websocket <UserType>::disconnect_impl);
+		socket.set_error_cb(&Websocket <UserType>::error_impl);
+		// Set up keepalive heartbeat.
+		if (run_settings.keepalive != Loop::Duration()) {
+			Loop *loop = Loop::get(run_settings.loop);
+			keepalive_handle = loop->add_timeout(Loop::TimeoutRecord(loop->now() + run_settings.keepalive, run_settings.keepalive, this, &Websocket <UserType>::keepalive));
+		}
+		if (!hdrdata.empty())
+			inject(hdrdata);
+		if (DEBUG > 2)
+			WL_log("opened websocket");
+		http_state = HTTP_DONE;
+		// TODO: trigger callback.
+		break;
+	}
+	default:
+		throw "Invalid HttpState in Websocket";
+	}
+}
 
 template <class UserType>
 Websocket <UserType>::Websocket(std::string const &address, ConnectSettings const &connect_settings, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
@@ -283,85 +355,9 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 		userpwd +
 		extra_headers +
 		"\r\n");
-	std::string hdrdata;
-	std::string::size_type pos;
-	while (true) {
-		pos = hdrdata.find("\n");
-		if (pos != std::string::npos)
-			break;
-		std::string r;
-
-		// FIXME: this should not be a blocking call.
-		while (true) {
-			errno = 0;
-			r = socket.recv();
-			if (!r.empty())
-				break;
-			if (errno == 0)
-				throw "EOF while reading first line of response";
-			if (errno == EWOULDBLOCK)
-				continue;
-			WL_log(std::string("Error reading first line from socket: ") + strerror(errno));
-			throw "Error reading first line from socket";
-		}
-		hdrdata += r;
-	}
-	std::istringstream firstline(hdrdata.substr(0, pos));
-	std::string namecode;
-	int numcode;
-	firstline >> namecode >> numcode;
-	if (numcode != 101) {
-		WL_log("Unexpected reply: " + hdrdata);
-		throw "wrong reply code";
-	}
-	hdrdata = hdrdata.substr(pos + 1);
-	while (true) {
-		pos = hdrdata.find("\n");
-		if (pos == std::string::npos) {
-			errno = 0;
-			std::string r;
-			while (true) {
-				r = socket.recv();	// FIXME: this should not be a blocking call.
-				if (!r.empty())
-					break;
-				if (errno == 0)
-					throw "EOF while reading header";
-				if (errno == EWOULDBLOCK)
-					continue;
-				WL_log(std::string("Error reading header from socket: ") + strerror(errno));
-				throw "Error reading header from socket";
-			}
-			hdrdata += r;
-			continue;
-		}
-		std::string line = hdrdata.substr(0, pos);
-		hdrdata = hdrdata.substr(pos + 1);
-		if (strip(line).empty())
-			break;
-		if (DEBUG > 2)
-			WL_log("Header: " + line);
-		std::string::size_type sep = line.find(":");
-		if (sep == std::string::npos) {
-			WL_log("invalid header line");
-			throw "invalid header line";
-		}
-		std::string key = line.substr(0, sep);
-		std::string value = line.substr(sep + 1);
-		received_headers[strip(key)] = strip(value);
-	}
-	is_closed = false;
-	socket.read(&Websocket <UserType>::inject);
-	socket.set_disconnect_cb(&Websocket <UserType>::disconnect_impl);
-	socket.set_error_cb(&Websocket <UserType>::error_impl);
-	// Set up keepalive heartbeat.
-	if (run_settings.keepalive != Loop::Duration()) {
-		Loop *loop = Loop::get(run_settings.loop);
-		keepalive_handle = loop->add_timeout(Loop::TimeoutRecord(loop->now() + run_settings.keepalive, run_settings.keepalive, this, &Websocket <UserType>::keepalive));
-	}
-	if (!hdrdata.empty())
-		inject(hdrdata);
-	if (DEBUG > 2)
-		WL_log("opened websocket");
+	http_state = HTTP_START;
+	// TODO: Set special error and disconnect callbacks for connection startup.
+	socket.read(&Websocket <UserType>::recv_http);
 } // }}}
 
 template <class UserType>
@@ -1614,7 +1610,7 @@ public:
 	// Empty constructor, for moving a connected object into.
 	RPC() : disconnect_cb(nullptr), error_cb(nullptr), activation_handle(Loop::get()->invalid_idle()), activated(false), user(nullptr), reply_index(0), expecting_reply_bg{}, expecting_reply_fg{}, delayed_calls{}, called_data{}, websocket{} {}
 	// Constructor to connect to host.
-	RPC(std::string const &address, UserType *user = nullptr, Websocket <RPC <UserType> >::ConnectSettings const &connect_settings = {.method = "GET", .user = {}, .password = {}, .sent_headers = {}}, Websocket <RPC <UserType> >::RunSettings const &run_settings = {.loop = nullptr, .keepalive = 50s});
+	RPC(std::string const &address, UserType *user = nullptr, Websocket <RPC <UserType> >::ConnectSettings const &connect_settings = {}, Websocket <RPC <UserType> >::RunSettings const &run_settings = {.loop = nullptr, .keepalive = 50s});
 	~RPC() { // {{{
 		STARTFUNC;
 		if (activation_handle != Loop::get()->invalid_idle())

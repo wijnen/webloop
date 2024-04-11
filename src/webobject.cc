@@ -1,5 +1,6 @@
 #include "webloop/webobject.hh"
 #include "webloop/network.hh"
+#include "webloop/coroutine.hh"
 #include <cmath>
 
 namespace Webloop {
@@ -439,12 +440,50 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 #endif
 // }}}
 
+coroutine WebCoroutinePointer::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	return target(args, merge(kwargs));
+} // }}}
+
+coroutine WebCoroutineMemberBase::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	return (object->*target)(args, merge(kwargs));
+} // }}}
+
+coroutine WebFunctionPointer::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	co_return target(args, merge(kwargs));
+} // }}}
+
+coroutine WebMemberBase::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	co_return (object->*target)(args, merge(kwargs));
+} // }}}
+
 // Operators. {{{
 uint64_t constexpr make_type_key(int lhs, int rhs) { return ((uint64_t)lhs << 32) | rhs; }
 
-std::shared_ptr <WebObject> binary_int(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op) { // {{{
-	WebObject::IntType l = *lhs->as_int();
-	WebObject::IntType r = *rhs->as_int();
+static std::shared_ptr <WebObject> unary_int(WebObject &obj, char op) { // {{{
+	WebObject::IntType i = *obj.as_int();
+	switch (op) {
+	case '-':
+		return WebInt::create(-i);
+	case '~':
+		return WebInt::create(~i);
+	case '!':
+		return WebBool::create(!i);
+	}
+	throw "unknown operator called on int type";
+} // }}}
+std::shared_ptr <WebObject> unary_map(WebObject &obj, char op) { // {{{
+	WebMap &i = *obj.as_map();
+	if (op == '~') {
+		auto ret = i.copy();
+		ret->as_map()->inverted = !i.inverted;
+		return ret;
+	}
+	throw "unknown operator called on int type";
+} // }}}
+
+static std::shared_ptr <WebObject> binary_int_int(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	WebObject::IntType l = *lhs.as_int();
+	WebObject::IntType r = *rhs.as_int();
 	switch (op) {
 	case '+':
 		return WebInt::create(l + r);
@@ -456,28 +495,272 @@ std::shared_ptr <WebObject> binary_int(std::shared_ptr <WebObject> lhs, std::sha
 		return WebFloat::create(l / r);
 	case '%':
 		return WebInt::create(l % r);
+	case '&':
+		return WebInt::create(l & r);
+	case '|':
+		return WebInt::create(l | r);
+	case '^':
+		return WebInt::create(l ^ r);
+	case '{':
+		return WebInt::create(l << r);
+	case '}':
+		return WebInt::create(l >> r);
+	case '<':
+		return WebBool::create(l < r);
+	case '>':
+		return WebBool::create(l > r);
+	case ',':
+		return WebBool::create(l <= r);
+	case '.':
+		return WebBool::create(l >= r);
+	case '=':
+		return WebBool::create(l == r);
+	case '!':
+		return WebBool::create(l != r);
 	}
 	throw "unknown operator called on int type";
 } // }}}
+std::shared_ptr <WebObject> binary_vector_vector(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	WebVector &l = *lhs.as_vector();
+	WebVector &r = *rhs.as_vector();
+	switch (op) {
+	case '+':
+	{
+		auto ret = l.copy();
+		for (size_t i = 0; i < r.size(); ++i)
+			ret->as_vector()->push_back(r[i]);
+		return ret;
+	}
+	case '=':
+		if (l.size() != r.size())
+			return WebBool::create(false);
+		for (size_t i = 0; i < l.size(); ++i) {
+			if (*l[i] != *r[i])
+				return WebBool::create(false);
+		}
+		return WebBool::create(true);
+	case '!':
+		if (l.size() != r.size())
+			return WebBool::create(true);
+		for (size_t i = 0; i < l.size(); ++i) {
+			if (*l[i] != *r[i])
+				return WebBool::create(true);
+		}
+		return WebBool::create(false);
+	}
+	throw "unknown operator called on vector type";
+} // }}}
+std::shared_ptr <WebObject> binary_vector_int(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	WebVector &l = *lhs.as_vector();
+	WebInt &r = *rhs.as_int();
+	if (op != '[')
+		throw "Invalid operator for vector and int (only array is allowed)";
+	return l[(WebObject::IntType)r];
+} // }}}
+std::shared_ptr <WebObject> binary_map_map(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	WebMap &l = *lhs.as_map();
+	WebMap &r = *rhs.as_map();
+	std::shared_ptr <WebObject> ret_obj = WebMap::create();
+	WebMap &ret = *ret_obj->as_map();
+	switch (op) {
+	case '&':
+		if (!l.inverted && r.inverted) {
+			// Only rhs inverted.
+			for (auto i: l.value) {
+				if (!r.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else if (l.inverted && !r.inverted) {
+			// Only lhs inverted.
+			for (auto i: r.value) {
+				if (!l.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else if (l.inverted) {
+			// Both inverted.
+			ret.inverted = true;
+			for (auto i: l.value)
+				ret.value.insert(i);
+			for (auto i: r.value) {
+				if (!ret.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else {
+			// Neither inverted.
+			for (auto i: r.value) {
+				if (l.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		return ret_obj;
+	case '|':
+		if (!l.inverted && r.inverted) {
+			// Only rhs inverted.
+			ret.inverted = true;
+			for (auto i: r.value) {
+				if (!l.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else if (l.inverted && !r.inverted) {
+			// Only lhs inverted.
+			ret.inverted = true;
+			for (auto i: l.value) {
+				if (!r.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else if (l.inverted) {
+			// Both inverted.
+			ret.inverted = true;
+			for (auto i: r.value) {
+				if (l.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		else {
+			// Neither inverted.
+			for (auto i: l.value)
+				ret.value.insert(i);
+			for (auto i: r.value) {
+				if (!ret.value.contains(i.first))
+					ret.value.insert(i);
+			}
+		}
+		return ret_obj;
+	case '^':
+		ret.inverted = l.inverted ^ r.inverted;
+		for (auto i: r.value) {
+			if (!l.value.contains(i.first))
+				ret.value.insert(i);
+		}
+		for (auto i: l.value) {
+			if (!r.value.contains(i.first))
+				ret.value.insert(i);
+		}
+		return ret_obj;
+	case '=':
+		if (l.size() != r.size())
+			return WebBool::create(false);
+		for (auto i: l.value) {
+			auto j = r.value.find(i.first);
+			if (j == r.value.end() || i.second != j->second)
+				return WebBool::create(false);
+		}
+		return WebBool::create(true);
+	case '!':
+		if (l.size() != r.size())
+			return WebBool::create(true);
+		for (auto i: l.value) {
+			auto j = r.value.find(i.first);
+			if (j == r.value.end() || i.second != j->second)
+				return WebBool::create(true);
+		}
+		return WebBool::create(false);
+	}
+	throw "unknown operator called on map type";
+} // }}}
+std::shared_ptr <WebObject> binary_map_string(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	WebMap &l = *lhs.as_map();
+	WebString &r = *rhs.as_string();
+	if (op != '[')
+		throw "Invalid operator for map and string (only array is allowed)";
+	return l.value[std::string(r)];
+} // }}}
 
+static coroutine function_webfunctionpointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	WebFunctionPointer &f = *target.as <WebFunctionPointer>();
+	return f(args, kwargs);
+} // }}}
+static coroutine function_webcoroutinepointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	WebCoroutinePointer &f = *target.as <WebCoroutinePointer>();
+	return f(args, kwargs);
+} // }}}
+static coroutine function_webmemberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	WebMemberBase &f = *target.as <WebMemberBase>();
+	return f(args, kwargs);
+} // }}}
+static coroutine function_webcoroutinememberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	WebCoroutineMemberBase &f = *target.as <WebCoroutineMemberBase>();
+	return f(args, kwargs);
+} // }}}
+
+static coroutine function_webcoroutine(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	WebCoroutine &f = *target.as <WebCoroutine>();
+	return f(args, kwargs);
+} // }}}
+
+std::map <int, WebObject::unary_operator_impl> WebObject::unary_operator_registry = { // {{{
+	{INT, unary_int},
+	{MAP, unary_map}
+}; // }}}
 std::map <uint64_t, WebObject::binary_operator_impl> WebObject::binary_operator_registry = { // {{{
-	{make_type_key(INT, INT), binary_int}
+	{make_type_key(INT, INT), binary_int_int},
+	{make_type_key(VECTOR, VECTOR), binary_vector_vector},
+	{make_type_key(VECTOR, INT), binary_vector_int},
+	{make_type_key(MAP, MAP), binary_map_map},
+	{make_type_key(MAP, STRING), binary_map_string}
+}; // }}}
+std::map <int, WebObject::function_operator_impl> WebObject::function_operator_registry = { // {{{
+	{WebFunctionPointer::object_type, function_webfunctionpointer},
+	{WebCoroutinePointer::object_type, function_webcoroutinepointer},
+	{WebCoroutine::object_type, function_webcoroutine},
+	{WebMemberBase::object_type, function_webmemberbase},
+	{WebCoroutineMemberBase::object_type, function_webcoroutinememberbase}
 }; // }}}
 
+void WebObject::register_unary_operators(int type, unary_operator_impl impl) { // {{{
+	unary_operator_registry.insert({type, impl});
+} // }}}
 void WebObject::register_binary_operators(int lhs_type, int rhs_type, binary_operator_impl impl) { // {{{
 	binary_operator_registry.insert({make_type_key(lhs_type, rhs_type), impl});
 } // }}}
 
-std::shared_ptr <WebObject> binary_operator(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs, char op) { // {{{
-	auto it = WebObject::binary_operator_registry.find(make_type_key(lhs->get_type(), rhs->get_type()));
+std::shared_ptr <WebObject> WebObject::binary_operator(WebObject &lhs, WebObject &rhs, char op) { // {{{
+	auto it = WebObject::binary_operator_registry.find(make_type_key(lhs.get_type(), rhs.get_type()));
 	if (it == WebObject::binary_operator_registry.end())
 		throw "calling undefined operator";
 	return it->second(lhs, rhs, op);
 } // }}}
 
-std::shared_ptr <WebObject> operator+(std::shared_ptr <WebObject> lhs, std::shared_ptr <WebObject> rhs) { return binary_operator(lhs, rhs, '+'); }
+std::shared_ptr <WebObject> WebObject::operator+(WebObject &rhs) { return binary_operator(*this, rhs, '+'); }
+std::shared_ptr <WebObject> WebObject::operator-(WebObject &rhs) { return binary_operator(*this, rhs, '-'); }
+std::shared_ptr <WebObject> WebObject::operator*(WebObject &rhs) { return binary_operator(*this, rhs, '*'); }
+std::shared_ptr <WebObject> WebObject::operator/(WebObject &rhs) { return binary_operator(*this, rhs, '/'); }
+std::shared_ptr <WebObject> WebObject::operator%(WebObject &rhs) { return binary_operator(*this, rhs, '%'); }
+std::shared_ptr <WebObject> WebObject::operator&(WebObject &rhs) { return binary_operator(*this, rhs, '&'); }
+std::shared_ptr <WebObject> WebObject::operator|(WebObject &rhs) { return binary_operator(*this, rhs, '|'); }
+std::shared_ptr <WebObject> WebObject::operator^(WebObject &rhs) { return binary_operator(*this, rhs, '^'); }
+std::shared_ptr <WebObject> WebObject::operator<<(WebObject &rhs) { return binary_operator(*this, rhs, '{'); }
+std::shared_ptr <WebObject> WebObject::operator>>(WebObject &rhs) { return binary_operator(*this, rhs, '}'); }
+std::shared_ptr <WebObject> WebObject::operator<(WebObject &rhs) { return binary_operator(*this, rhs, '<'); }
+std::shared_ptr <WebObject> WebObject::operator>(WebObject &rhs) { return binary_operator(*this, rhs, '>'); }
+std::shared_ptr <WebObject> WebObject::operator<=(WebObject &rhs) { return binary_operator(*this, rhs, ','); }
+std::shared_ptr <WebObject> WebObject::operator>=(WebObject &rhs) { return binary_operator(*this, rhs, '.'); }
+std::shared_ptr <WebObject> WebObject::operator==(WebObject &rhs) { return binary_operator(*this, rhs, '='); }
+std::shared_ptr <WebObject> WebObject::operator!=(WebObject &rhs) { return binary_operator(*this, rhs, '!'); }
+std::shared_ptr <WebObject> WebObject::operator[](WebObject &rhs) { return binary_operator(*this, rhs, '['); }
 
+coroutine WebObject::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+	auto it = WebObject::function_operator_registry.find(get_type());
+	if (it == WebObject::function_operator_registry.end())
+		throw "calling undefined function operator";
+	if (args == nullptr)
+		args = WV();
+	if (kwargs == nullptr)
+		kwargs = WM();
+	return it->second(*this, args, kwargs);
+} // }}}
 // }}}
+
+std::shared_ptr <WebObject> WebCallable::merge(std::shared_ptr <WebObject> kwargs) const { // {{{
+	if (bound == nullptr)
+		return kwargs;
+	return *bound | *kwargs;
+} // }}}
 
 }
 

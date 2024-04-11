@@ -29,14 +29,22 @@ namespace Webloop {
 
 struct FinalSuspendAwaitable;
 
+extern std::shared_ptr <WebObject> *debug_ptr;
+
 struct coroutine { // {{{
+	static int next_name_id;
 	struct promise_type;
 	struct CbBase {};	// Not actually the base, the class just uses it as such.
 	using handle_type = std::coroutine_handle <promise_type>;
 	struct promise_type { // {{{
+		// For debugging: name.
+		std::string name;
 		// from_coroutine = handle(to_coroutine); to_coroutine = Yield(from_coroutine);
 		std::shared_ptr <WebObject> from_coroutine;
 		std::shared_ptr <WebObject> to_coroutine;
+		// For notifying about completion.
+		bool *is_done;
+		std::shared_ptr <WebObject> *retval;
 
 		// Callback is used for launched coroutines. It should not be set for YieldFrom.
 		typedef void (CbBase::*Cb)(std::shared_ptr <WebObject> ret);
@@ -45,12 +53,12 @@ struct coroutine { // {{{
 		handle_type continuation;	// Target coroutine to run when we are finished. Used by YieldFrom.
 
 		// Constructor and related functions.
-		promise_type() : from_coroutine(), to_coroutine(), cb_base(nullptr), cb(), continuation() { STARTFUNC; }
+		promise_type() : name(std::to_string(next_name_id++)), from_coroutine(), to_coroutine(), is_done(nullptr), retval(nullptr), cb_base(nullptr), cb(), continuation() { STARTFUNC; }
 		~promise_type() { STARTFUNC; }
 		coroutine get_return_object() { STARTFUNC; return coroutine(handle_type::from_promise(*this)); }
 		std::suspend_always initial_suspend() noexcept { STARTFUNC; return {}; }
 		inline FinalSuspendAwaitable final_suspend() noexcept;
-		void unhandled_exception() { STARTFUNC; }
+		void unhandled_exception() { STARTFUNC; WL_log("Unhandled exception from coroutine"); }
 
 		// If co_yield is used, this function is called. If Yield is used, the YieldAwaiter class below is used.
 		std::suspend_always yield_value(std::shared_ptr <WebObject> v) { STARTFUNC; from_coroutine.swap(v); return {}; }
@@ -71,8 +79,8 @@ struct coroutine { // {{{
 	handle_type handle;
 	coroutine(handle_type handle) : handle(handle) { STARTFUNC; }
 	~coroutine() { STARTFUNC; }
-	static std::shared_ptr <WebObject> activate(handle_type *handle, std::shared_ptr <WebObject> to_coroutine = WebNone::create());	// Argument is returned from Yield.
-	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> to_coroutine = WebNone::create()) { return activate(&handle, to_coroutine); }
+	static std::shared_ptr <WebObject> activate(handle_type *handle, std::shared_ptr <WebObject> to_coroutine = WebNone::create(), bool *is_done = nullptr);	// Argument is returned from Yield.
+	std::shared_ptr <WebObject> operator()(std::shared_ptr <WebObject> to_coroutine = WebNone::create(), bool *is_done = nullptr) { STARTFUNC; return activate(&handle, to_coroutine, is_done); }
 	operator bool() { STARTFUNC; return handle.done(); }
 	template <class Base> void set_cb(Base *base, void (Base::*new_cb)(std::shared_ptr <WebObject> ret)) { STARTFUNC; handle.promise().set_cb(reinterpret_cast <CbBase *>(base), reinterpret_cast <promise_type::Cb>(new_cb)); }
 	void set_continuation(coroutine::handle_type target) { STARTFUNC; handle.promise().set_continuation(target); }
@@ -122,6 +130,31 @@ struct GetHandleAwaiter { // {{{
 #define Yield(from_coroutine) (co_await Webloop::YieldAwaiter(from_coroutine))
 #define YieldFrom(target) (co_await Webloop::YieldFromAwaiter(target))
 // }}}
+
+// This class contains a running (or finished) coroutine.
+// It would be more suited in WebObject, but class coroutine cannot be defined in there.
+class WebCoroutine : public WebObject { // {{{
+private:
+	coroutine my_coroutine;
+public:
+	static int const object_type = make_object_type("RCO\0");
+
+	// Construction
+	WebCoroutine(coroutine c) : WebObject(object_type), my_coroutine(c) {}
+	static std::shared_ptr <WebObject> create(coroutine c);
+
+	// Parts that are needed for WebObject.
+public:
+	std::shared_ptr <WebObject> copy() const override { return create(my_coroutine); }
+	std::string print() const override { return "C++ Running Coroutine wrapper"; }
+
+	// Resume.
+	std::shared_ptr <WebObject> resume(std::shared_ptr <WebObject> arg) { return my_coroutine(arg); }
+
+	// Check if coroutine is done.
+	operator bool() { return bool(my_coroutine); }
+
+}; // }}}
 
 }
 

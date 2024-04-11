@@ -1,5 +1,9 @@
 #include "webloop.hh"
 
+/*
+TEST RESULT: 0
+*/
+
 using namespace Webloop;
 
 int main(int argc, char **argv) {

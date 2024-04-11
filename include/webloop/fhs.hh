@@ -261,14 +261,14 @@ typedef MultiOption<double> DoubleMultiOption;
 
 // Globals. {{{
 enum InitState { UNINITIALIZED, INITIALIZING, INITIALIZED };
-/// Flag that is set to true when init() is called.
+/// Flag that is set to true when fhs_init() is called.
 extern InitState initialized;
-/// Flag that is set during init() if --system was specified, or the application set this directly; that should be done before calling init().
+/// Flag that is set during fhs_init() if --system was specified, or the application set this directly; that should be done before calling fhs_init().
 /// It should be set to true or false; it's defined as an int to detect it not having been set, to disable the --system option if it was forced to false.
 extern int is_system;
-/// Flag that is set before calling init() by the application if this is a game (makes it use /usr/games instead of /usr/bin).
+/// Flag that is set before calling fhs_init() by the application if this is a game (makes it use /usr/games instead of /usr/bin).
 extern bool is_game;
-/// Default program name; can be overridden from functions that use it. Default value is set in init().
+/// Default program name; can be overridden from functions that use it. Default value is set in fhs_init().
 extern std::string pname;
 /// Current user's home directory.
 extern std::filesystem::path HOME;
@@ -276,7 +276,29 @@ extern std::filesystem::path HOME;
 typedef void (*generic_cb)(void *arg);
 // }}}
 
-void init(char **argv, std::string const &help = std::string(), std::string const &version = std::string(), std::string const &contact = std::string(), std::string const &packagename = std::string());
+#ifndef WEBLOOP_HELP
+/// Define this macro with the help text for the program.
+#define WEBLOOP_HELP "No help text available for this program"
+#endif
+#ifndef WEBLOOP_VERSION
+/// Define this macro with the version for the program.
+#define WEBLOOP_VERSION "No version defined for this program"
+#endif
+#ifndef WEBLOOP_CONTACT
+/// Define this macro with contact information for the program.
+#define WEBLOOP_CONTACT "No contact defined for this program"
+#endif
+#ifndef WEBLOOP_PACKAGE_NAME
+/// If this macro is not empty, it overrides the package name for this program.
+/// The default is the name of the executable, without its extension.
+#define WEBLOOP_PACKAGE_NAME ""
+#endif
+
+void fhs_init_impl(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename);
+
+/// Parse commandline arguments, read configuration file and initialize fhs paths.
+static inline void fhs_init(int argc, char **argv) { (void)&argc; fhs_init_impl(argv, WEBLOOP_HELP, WEBLOOP_VERSION, WEBLOOP_CONTACT, WEBLOOP_PACKAGE_NAME); }
+
 void atinit(generic_cb target, void *data);
 
 // Configuration files. {{{

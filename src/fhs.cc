@@ -26,14 +26,14 @@ namespace Webloop {
 
 // Globals. {{{
 std::vector <std::string> arguments;
-/// Flag that is set to true when init() is called.
+/// Flag that is set to true when fhs_init() is called.
 InitState initialized = UNINITIALIZED;
-/// Flag that is set during init() if --system was specified, or the application set this directly; that should be done before calling init().
+/// Flag that is set during fhs_init() if --system was specified, or the application set this directly; that should be done before calling fhs_init().
 /// It should be set to true or false; it's defined as an int to detect it not having been set, to disable the --system option if it was forced to false.
 int is_system = -1;
-/// Flag that is set before calling init() by the application if this is a game (makes it use /usr/games instead of /usr/bin).
+/// Flag that is set before calling fhs_init() by the application if this is a game (makes it use /usr/games instead of /usr/bin).
 bool is_game = false;
-/// Default program name; can be overridden from functions that use it. Default value is set in init().
+/// Default program name; can be overridden from functions that use it. Default value is set in fhs_init().
 std::string pname;
 /// Current user's home directory.
 std::filesystem::path HOME
@@ -559,7 +559,7 @@ static char maybe_short(char opt) { // {{{
 	return opt;
 } // }}}
 
-void init(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename) { // {{{
+void fhs_init_impl(char **argv, std::string const &help, std::string const &version, std::string const &contact, std::string const &packagename) { // {{{
 	/**Initialize the module.
 	This function must be called before any other in this module (except
 	option definitions and module_init(), which must be called before this
