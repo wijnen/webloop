@@ -52,9 +52,10 @@ public:
 
 void run_coroutine(coroutine c) {
 	std::shared_ptr <WebObject> r;
+	bool done = false;
 	while (true) {
-		r = c(WN());
-		if (bool(c))
+		r = c(WN(), &done);
+		if (done)
 			break;
 		if (&*r == nullptr)
 			std::cout << "invalid value yielded!" << std::endl;
