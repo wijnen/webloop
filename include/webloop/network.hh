@@ -247,10 +247,10 @@ private:
 	int active_backlog;
 	std::list <SocketBase *> remotes;
 
-	OwnerBase *owner;
 	void open_socket(std::string const &service, int backlog);
 	void remote_disconnect(std::list <SocketBase *>::iterator socket);
 protected:
+	OwnerBase *owner;
 	// Callbacks.
 	CreateType create_cb;
 	ClosedType closed_cb;
@@ -295,10 +295,10 @@ public:
 	template <class OtherUser, class OtherOwner> explicit Server(Server <OtherUser, OtherOwner> &&other, OwnerType *new_owner, CreateCb create, ClosedCb closed, ErrorCb error) :
 		ServerBase(std::move(other))
 	{
-		owner = new_owner;
-		create_cb = create;
-		closed_cb = closed;
-		error_cb = error;
+		owner = reinterpret_cast <OwnerBase *>(new_owner);
+		set_create_cb(create);
+		set_closed_cb(closed);
+		set_error_cb(error);
 	}
 
 	// Set callbacks.

@@ -108,7 +108,6 @@ struct YieldAwaiter { // {{{
 
 struct YieldFromAwaiter { // {{{
 	// This class lets YieldFrom prepare another coroutine for yielding from it.
-	coroutine::handle_type my_handle;
 	coroutine::handle_type target_handle;
 	YieldFromAwaiter(coroutine target) : target_handle(target.handle) { STARTFUNC; }
 	bool await_ready() noexcept { STARTFUNC; return false; }

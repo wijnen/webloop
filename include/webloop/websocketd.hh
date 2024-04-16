@@ -83,8 +83,9 @@ private:
 	void inject(std::string &data);	// Make the class handle incoming data.
 	void disconnect_impl() { if (disconnect_cb != nullptr) (user->*disconnect_cb)(); else WL_log("disconnect"); }
 	void error_impl(std::string const &message) { if (error_cb != nullptr) (user->*error_cb)(message); else WL_log("error: " + message); }
-	enum HttpState { HTTP_START, HTTP_HEADER, HTTP_DONE };
+	enum HttpState { HTTP_INACTIVE, HTTP_START, HTTP_HEADER, HTTP_DONE };
 	HttpState http_state;
+	coroutine::handle_type init_waiter;
 	void recv_http(std::string &hdrdata);	// Receive http headers and non-websocket body data.
 public:
 	/// Settings that are only used for connecting websockets.
@@ -129,6 +130,16 @@ public:
 	/// Constructor for a websocket that was accepted by a server.
 	template <class ServerType>
 	Websocket(Socket <ServerType> &&src, UserType *user = nullptr, Receiver receiver = nullptr, RunSettings const &run_settings = {});
+
+	coroutine wait_for_init() {
+		if (http_state != HTTP_DONE) {
+			std::cout << "yielding " << std::hex << (long)this << std::dec << std::endl;
+			init_waiter = GetHandle();
+			co_yield WebNone::create();
+		}
+		std::cout << "returning " << std::hex << (long)this << std::dec << std::endl;
+		co_return WebNone::create();
+	}
 
 	/// Websocket move constructor.
 	Websocket(Websocket <UserType> &&src);
@@ -200,6 +211,8 @@ Websocket <UserType>::Websocket() : // {{{
 	user(),
 	disconnect_cb(),
 	error_cb(),
+	http_state(HTTP_INACTIVE),
+	init_waiter(),
 	connect_settings(),
 	run_settings(),
 	received_headers(),
@@ -209,8 +222,10 @@ Websocket <UserType>::Websocket() : // {{{
 } // }}}
 
 template <class UserType>
-void Websocket <UserType>::recv_http(std::string &hdrdata) {
+void Websocket <UserType>::recv_http(std::string &hdrdata) { // {{{
 	switch (http_state) {
+	case HTTP_INACTIVE:
+		throw "receiving data before socket is active";
 	case HTTP_START:
 	{
 		std::string::size_type pos = hdrdata.find("\n");
@@ -262,15 +277,25 @@ void Websocket <UserType>::recv_http(std::string &hdrdata) {
 		if (!hdrdata.empty())
 			inject(hdrdata);
 		if (DEBUG > 2)
-			WL_log("opened websocket");
+			WL_log("opened websocket " + get_name());
 		http_state = HTTP_DONE;
-		// TODO: trigger callback.
+
+		// Wake init waiter.
+		if (init_waiter != coroutine::handle_type()) {
+			if (DEBUG > 3)
+				WL_log("waking init waiter");
+			init_waiter();
+		}
+		else {
+			if (DEBUG > 3)
+				WL_log("not waking");
+		}
 		break;
 	}
 	default:
 		throw "Invalid HttpState in Websocket";
 	}
-}
+} // }}}
 
 template <class UserType>
 Websocket <UserType>::Websocket(std::string const &address, ConnectSettings const &connect_settings, UserType *user, Receiver receiver, RunSettings const &run_settings) : // {{{
@@ -285,6 +310,8 @@ Websocket <UserType>::Websocket(std::string const &address, ConnectSettings cons
 	user(user),
 	disconnect_cb(),
 	error_cb(),
+	http_state(HTTP_INACTIVE),
+	init_waiter(),
 	connect_settings(connect_settings),
 	run_settings(run_settings),
 	received_headers(),
@@ -373,6 +400,8 @@ Websocket <UserType>::Websocket(int socket_fd, UserType *user, Receiver receiver
 	user(user),
 	disconnect_cb(),
 	error_cb(),
+	http_state(HTTP_INACTIVE),
+	init_waiter(),
 	connect_settings(),
 	run_settings(run_settings),
 	received_headers(),
@@ -441,6 +470,7 @@ Websocket <UserType>::Websocket(Socket <ServerType> &&src, UserType *user, Recei
 	user(user),
 	disconnect_cb(),
 	error_cb(),
+	http_state(HTTP_INACTIVE),
 	connect_settings(),
 	run_settings(run_settings),
 	received_headers(),
@@ -472,12 +502,15 @@ Websocket <UserType>::Websocket(Websocket <UserType> &&other) : // {{{
 	user(other.user),
 	disconnect_cb(other.disconnect_cb),
 	error_cb(other.error_cb),
+	http_state(other.http_state),
+	init_waiter(other.init_waiter),
 	connect_settings(other.connect_settings),
 	run_settings(other.run_settings),
 	received_headers(std::move(other.received_headers)),
 	socket(std::move(other))
 {
 	socket.update_user(this);
+	other.init_waiter = coroutine::handle_type();
 	other.buffer.clear();
 	other.fragments.clear();
 	other.received_headers.clear();
@@ -512,6 +545,8 @@ Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&oth
 	user = other.user;
 	disconnect_cb = other.disconnect_cb;
 	error_cb = other.error_cb;
+	http_state = other.http_state;
+	init_waiter = other.init_waiter;
 	connect_settings = other.connect_settings;
 	run_settings = other.run_settings;
 	received_headers = std::move(other.received_headers);
@@ -523,6 +558,7 @@ Websocket <UserType> &Websocket <UserType>::operator=(Websocket <UserType> &&oth
 			keepalive_handle = loop->add_timeout(Loop::TimeoutRecord(loop->now() + run_settings.keepalive, run_settings.keepalive, this, &Websocket <UserType>::keepalive));
 		}
 	}
+	other.init_waiter = coroutine::handle_type();
 	other.is_closed = true;
 	socket.set_disconnect_cb(&Websocket <UserType>::disconnect_impl);
 	socket.set_error_cb(&Websocket <UserType>::error_impl);
@@ -816,6 +852,10 @@ private:
 	void create_connection(Socket <Connection> *socket);
 public:
 	Httpd(OwnerType *owner, std::string const &service, std::string const &htmldir = "html", Loop *loop = nullptr, int backlog = 5);
+	~Httpd() { STARTFUNC; WL_log("destructing http server " + std::to_string((long)this)); }
+	// Move support.
+	Httpd(Httpd <OwnerType> &&src);
+	Httpd <OwnerType> &operator=(Httpd <OwnerType> &&src);
 	void set_post(PostCb callback) { STARTFUNC; post_cb = callback; }
 	void set_accept(AcceptCb callback) { STARTFUNC; accept_cb = callback; }
 	void set_closed(ClosedCb callback) { STARTFUNC; closed_cb = callback; }
@@ -827,20 +867,21 @@ public:
 
 template <class OwnerType>
 void Httpd <OwnerType>::server_closed() { // {{{
-	WL_log("Server closed");
+	WL_log("Server closed " + std::to_string((long)this));
 	if (closed_cb != nullptr)
 		(owner->*closed_cb)();
 } // }}}
 
 template <class OwnerType>
 void Httpd <OwnerType>::server_error(std::string const &message) { // {{{
-	WL_log("Error received by server: " + message);
+	WL_log("Error received by server " + std::to_string((long)this) + ": " + message);
 	if (error_cb != nullptr)
 		(owner->*error_cb)(message);
 } // }}}
 
 template <class OwnerType>
 void Httpd <OwnerType>::create_connection(Socket <Connection> *socket) { // {{{
+	WL_log("received new connection " + std::to_string((long)this));
 	connections.emplace_back(std::move(socket), this);
 } // }}}
 
@@ -853,6 +894,7 @@ Httpd <OwnerType>::Httpd(OwnerType *owner, std::string const &service, std::stri
 		htmldirs(htmldir.empty() ? std::list <std::filesystem::path>() : read_data_names(htmldir, {}, true, true)),
 		proxy(),
 		post_cb(),
+		accept_cb(),
 		closed_cb(),
 		error_cb(),
 		exts(),
@@ -860,6 +902,7 @@ Httpd <OwnerType>::Httpd(OwnerType *owner, std::string const &service, std::stri
 		keepalive(50s),
 		server(service, this, &Httpd <OwnerType>::create_connection, &Httpd <OwnerType>::server_closed, &Httpd <OwnerType>::server_error, loop, backlog)
 {
+	WL_log("created new http server " + std::to_string((long)this));
 	/* Create a webserver.
 	Additional arguments are passed to the network.Server.
 	@param port: Port to listen on.  Same format as in
@@ -920,6 +963,45 @@ Httpd <OwnerType>::Httpd(OwnerType *owner, std::string const &service, std::stri
 			{".txt", "text/plain;charset=utf-8"}
 		};
 	} // }}}
+} // }}}
+
+template <class OwnerType>
+Httpd <OwnerType>::Httpd(Httpd <OwnerType> &&src) : // {{{
+		owner(src.owner),
+		service(std::move(src.service)),
+		connections(std::move(src.connections)),
+		htmldirs(std::move(src.htmldirs)),
+		proxy(std::move(src.proxy)),
+		post_cb(src.post_cb),
+		accept_cb(src.accept_cb),
+		closed_cb(src.closed_cb),
+		error_cb(src.error_cb),
+		exts(std::move(src.exts)),
+		loop(src.loop),
+		keepalive(src.keepalive),
+		server(std::move(src.server), this, &Httpd <OwnerType>::create_connection, &Httpd <OwnerType>::server_closed, &Httpd <OwnerType>::server_error)
+{
+	STARTFUNC;
+	WL_log("moving http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
+} // }}}
+
+template <class OwnerType>
+Httpd <OwnerType> &Httpd <OwnerType>::operator=(Httpd <OwnerType> &&src) { // {{{
+	STARTFUNC;
+	WL_log("move-assigning http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
+	owner = std::move(src.owner);
+	service = std::move(src.service);
+	connections = std::move(src.connections);
+	htmldirs = std::move(src.htmldirs);
+	proxy = std::move(src.proxy);
+	post_cb = src.post_cb;
+	accept_cb = src.accept_cb;
+	closed_cb = src.closed_cb;
+	error_cb = src.error_cb;
+	exts = std::move(src.exts);
+	loop = src.loop;
+	keepalive = src.keepalive;
+	server = std::move(src.server);
 } // }}}
 
 template <class OwnerType>
@@ -1679,6 +1761,7 @@ public:
 template <class UserType>
 int RPC <UserType>::get_index() { // {{{
 	STARTFUNC;
+	WL_log("this: " + std::to_string((long)this));
 	++reply_index;
 	//print_expecting("creating reply index");
 	while (expecting_reply_bg.contains(reply_index) || expecting_reply_fg.contains(reply_index) || reply_index == 0)
@@ -2010,6 +2093,7 @@ coroutine RPC <UserType>::fgcall(std::string const &target, std::shared_ptr <Web
 		args = WebVector::create();
 	if (!kwargs)
 		kwargs = WebMap::create();
+	WL_log("this: " + std::to_string((long)this));
 	int index = get_index();
 	expecting_reply_fg[index] = GetHandle();
 	if (DEBUG > 4)

@@ -636,11 +636,13 @@ ServerBase::ServerBase(ServerBase &&other) : // {{{
 	closed_cb(other.closed_cb),
 	error_cb(other.error_cb)
 {
+	STARTFUNC;
 	for (auto &l: listeners)
 		l.server = this;
 } // }}}
 
 ServerBase &ServerBase::operator=(ServerBase &&other) { // {{{
+	STARTFUNC;
 	listenloop = other.listenloop;
 	listeners = std::move(other.listeners);
 	active_backlog = other.active_backlog;
@@ -656,7 +658,6 @@ ServerBase &ServerBase::operator=(ServerBase &&other) { // {{{
 
 void ServerBase::close() { // {{{
 	STARTFUNC;
-	assert(!listeners.empty());
 	while (!remotes.empty())
 		remotes.back()->close();
 	while (!listeners.empty()) {

@@ -22,12 +22,12 @@ std::coroutine_handle <> FinalSuspendAwaitable::await_suspend(coroutine::handle_
 	}
 	// Continuation: ignore result pointers.
 
+	auto continuation = promise->continuation;
 	// Store return value into target.
-	auto *target = &promise->continuation.promise();
+	auto *target = &continuation.promise();
 	target->to_coroutine.swap(promise->from_coroutine);
 
 	// Return into new coroutine.
-	auto continuation = promise->continuation;
 	handle.destroy();
 	return continuation;
 } // }}}
@@ -89,7 +89,6 @@ std::shared_ptr <WebObject> YieldAwaiter::await_resume() noexcept { // {{{
 // Suspend a coroutine using YieldFrom.
 coroutine::handle_type YieldFromAwaiter::await_suspend(coroutine::handle_type handle) noexcept { // {{{
 	STARTFUNC;
-	my_handle = handle;
 	target_handle.promise().set_continuation(handle);
 	return target_handle;
 } // }}}

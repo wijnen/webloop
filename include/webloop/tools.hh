@@ -14,10 +14,11 @@ namespace Webloop {
 // * 3: Incomplete packet information.
 // * 4: All incoming and outgoing data.
 // * 5: Non-websocket data.
+// * 6: Startfunc.
 extern int DEBUG;
 
-#if 0
-#define STARTFUNC do { std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
+#if 1
+#define STARTFUNC do { if (Webloop::DEBUG > 5) std::cout << __FILE__ << ":" << __LINE__ << ": " << __FUNCTION__ << " entered." << std::endl; } while(0)
 #else
 #define STARTFUNC do {} while(0)
 #endif
