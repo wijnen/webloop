@@ -1,6 +1,5 @@
 #include "webloop/webobject.hh"
 #include "webloop/network.hh"
-#include "webloop/coroutine.hh"
 #include <cmath>
 
 namespace Webloop {

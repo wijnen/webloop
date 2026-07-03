@@ -4,6 +4,7 @@
 #include <ctime>
 #include <iostream>
 #include <cassert>
+#include <charconv>
 
 namespace Webloop {
 
@@ -27,6 +28,7 @@ static int initial_debug() { // {{{
 int DEBUG = initial_debug();
 
 // String utilities. {{{
+
 std::string strip(std::string const &src, std::string const &chars) { // {{{
 	auto first = src.find_first_not_of(chars);
 	if (first == std::string::npos)
@@ -58,8 +60,8 @@ std::string rstrip(std::string const &src, std::string const &chars) { // {{{
 	return ret;
 } // }}}
 
-std::vector <std::string> split(std::string const &src, int maxcuts, std::string::size_type pos, std::string const &chars) { // {{{
-	std::vector <std::string> ret;
+std::vector <std::string_view> split(std::string_view const &src, int maxcuts, std::string::size_type pos, std::string_view const &chars) { // {{{
+	std::vector <std::string_view> ret;
 	while (maxcuts < 0 || ret.size() < unsigned(maxcuts)) {
 		pos = src.find_first_not_of(chars, pos);
 		if (pos == std::string::npos)
@@ -81,6 +83,12 @@ bool startswith(std::string const &data, std::string const &needle, std::string:
 	if (data.size() - p < needle.size())
 		return false;
 	return data.substr(p, needle.size()) == needle;
+} // }}}
+
+bool endswith(std::string const &data, std::string const &needle, std::string::size_type p) { // {{{
+	if (data.size() - p < needle.size())
+		return false;
+	return data.substr(data.size() - needle.size(), needle.size()) == needle;
 } // }}}
 
 std::string upper(std::string const &src) { // {{{

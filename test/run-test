@@ -1,0 +1,13 @@
+#!/bin/bash
+
+expected=`sed -n '/^OUTPUT:/,/^END OF OUTPUT./p' $1 | head -n -1 | tail -n +2`
+
+output=`$2`
+
+if [ x"$output" != x"$expected" ] ; then
+	echo >&2 "Incorrect output for $2:"
+	diff <(echo "$output") <(echo "$expected")
+	exit 1
+fi
+
+exit 0

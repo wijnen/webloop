@@ -53,14 +53,29 @@ private:	// Data members
 public:		// Member functions
 	WebObject(int type) : type(type) {}
 
-	WebNone *as_none() { assert(type == NONE); return reinterpret_cast <WebNone *>(this); }
-	WebBool *as_bool() { assert(type == BOOL); return reinterpret_cast <WebBool *>(this); }
-	WebInt *as_int() { assert(type == INT); return reinterpret_cast <WebInt *>(this); }
-	WebFloat *as_float() { assert(type == FLOAT); return reinterpret_cast <WebFloat *>(this); }
-	WebString *as_string() { assert(type == STRING); return reinterpret_cast <WebString *>(this); }
-	WebVector *as_vector() { assert(type == VECTOR); return reinterpret_cast <WebVector *>(this); }
-	WebMap *as_map() { assert(type == MAP); return reinterpret_cast <WebMap *>(this); }
-	template <class T> T *as() { assert(type == T::object_type); return reinterpret_cast <T *>(this); }
+	WebNone *as_none()
+	{ assert(type == NONE); return reinterpret_cast <WebNone *>(this); }
+
+	WebBool *as_bool()
+	{ assert(type == BOOL); return reinterpret_cast <WebBool *>(this); }
+
+	WebInt *as_int()
+	{ assert(type == INT); return reinterpret_cast <WebInt *>(this); }
+
+	WebFloat *as_float()
+	{ assert(type == FLOAT); return reinterpret_cast <WebFloat *>(this); }
+
+	WebString *as_string()
+	{ assert(type == STRING); return reinterpret_cast <WebString *>(this); }
+
+	WebVector *as_vector()
+	{ assert(type == VECTOR); return reinterpret_cast <WebVector *>(this); }
+
+	WebMap *as_map()
+	{ assert(type == MAP); return reinterpret_cast <WebMap *>(this); }
+
+	template <class T> T *as()
+	{ assert(type == T::object_type); return reinterpret_cast <T *>(this); }
 
 	WebObject &operator=(WebObject const &other) = delete;
 	WebObject(WebObject const &other) : type(other.type) {}
@@ -68,30 +83,55 @@ public:		// Member functions
 	virtual ~WebObject() {}
 	constexpr int get_type() const { return type; }
 
-	// Deep copy; this makes a copy of the derived class, returns a new() WebObject.
+	// Deep copy; this makes a copy of the derived class,
+	// returns a new() WebObject.
 	virtual std::shared_ptr <WebObject> copy() const = 0;
 
 	// Serialization.
-	virtual std::string dump() const { throw "Attempt to serialize invalid object"; };
+
+	virtual std::string dump() const
+	{ throw "Attempt to serialize invalid object"; };
+
 	virtual std::string print() const = 0;
+
 	static std::shared_ptr <WebObject> load(std::string const &data);
-	friend std::ostream &operator<<(std::ostream &s, WebObject const &o) { s << o.print(); return s; }
+
+	friend std::ostream &operator<<(std::ostream &s, WebObject const &o)
+	{ s << o.print(); return s; }
+
 private:
 #ifndef WEBOBJECT_DUMPS_JSON
 	virtual void load_impl(std::string const &data) = 0;
 #endif
-	typedef std::shared_ptr <WebObject> (*unary_operator_impl)(WebObject &obj, char op);
-	typedef std::shared_ptr <WebObject> (*binary_operator_impl)(WebObject &lhs, WebObject &rhs, char op);
-	typedef coroutine (*function_operator_impl)(WebObject &obj, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs);
+	typedef std::shared_ptr <WebObject> (*unary_operator_impl)
+		(WebObject &obj, char op);
+
+	typedef std::shared_ptr <WebObject> (*binary_operator_impl)
+		(WebObject &lhs, WebObject &rhs, char op);
+
+	typedef coroutine (*function_operator_impl)(WebObject &obj,
+			std::shared_ptr <WebObject> args,
+			std::shared_ptr <WebObject> kwargs);
+
 	static std::map <int, unary_operator_impl> unary_operator_registry;
-	static std::map <uint64_t, binary_operator_impl> binary_operator_registry;
-	static std::map <int, function_operator_impl> function_operator_registry;
-	static std::shared_ptr <WebObject> binary_operator(WebObject &lhs, WebObject &rhs, char op);
+
+	static std::map <uint64_t, binary_operator_impl>
+		binary_operator_registry;
+
+	static std::map <int, function_operator_impl>
+		function_operator_registry;
+
+	static std::shared_ptr <WebObject>
+		binary_operator(WebObject &lhs, WebObject &rhs, char op);
+
 protected:
-	static void register_unary_operators(int type, unary_operator_impl impl);
-	static void register_binary_operators(int lhs_type, int rhs_type, binary_operator_impl impl);
+	static void register_unary_operators(int type,
+			unary_operator_impl impl);
+	static void register_binary_operators(int lhs_type, int rhs_type,
+			binary_operator_impl impl);
 public:
-	coroutine operator()(std::shared_ptr <WebObject> args = nullptr, std::shared_ptr <WebObject> kwargs = nullptr);
+	coroutine operator()(std::shared_ptr <WebObject> args = nullptr,
+			std::shared_ptr <WebObject> kwargs = nullptr);
 	std::shared_ptr <WebObject> operator+(WebObject &rhs);
 	std::shared_ptr <WebObject> operator-(WebObject &rhs);
 	std::shared_ptr <WebObject> operator*(WebObject &rhs);
@@ -111,6 +151,8 @@ public:
 	std::shared_ptr <WebObject> operator[](WebObject &rhs);
 }; // }}}
 
+// This class is used as std::initializer_list <WebHelper> for WebVector and
+// WebMap; it casts things to WebObject constructor arguments.
 class WebHelper { // {{{
 	std::shared_ptr <WebObject> data;
 public:

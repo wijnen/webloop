@@ -22,12 +22,37 @@ extern int DEBUG;
 #else
 #define STARTFUNC do {} while(0)
 #endif
+template <typename T>
+T svtoa(std::string_view const &sv) // {{{
+{
+	T ret;
+	auto state = std::from_chars(sv.data(), sv.data() + sv.size(), ret);
+	if (state.ec != std::errc{})
+		throw state.ec;
+	if (state.ptr != sv.data() + sv.size())
+		throw "Not all data was used in svtoa";
+	return ret;
+} // }}}
+inline int svtoi(std::string_view const &sv) { return svtoa <int> (sv); }
+inline unsigned svtou(std::string_view const &sv)
+{ return svtoa <unsigned> (sv); }
+inline long svtol(std::string_view const &sv) { return svtoa <long> (sv); }
+inline float svtof(std::string_view const &sv) { return svtoa <float> (sv); }
+inline double svtod(std::string_view const &sv) { return svtoa <double> (sv); }
 
-std::string strip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
-std::string lstrip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
-std::string rstrip(std::string const &src, std::string const &chars = " \t\r\n\v\f");
-std::vector <std::string> split(std::string const &src, int maxcuts = -1, std::string::size_type pos = 0, std::string const &chars = " \t\r\n\v\f");
-bool startswith(std::string const &data, std::string const &needle, std::string::size_type p = 0);
+std::string strip(std::string const &src,
+		std::string const &chars = " \t\r\n\v\f");
+std::string lstrip(std::string const &src,
+		std::string const &chars = " \t\r\n\v\f");
+std::string rstrip(std::string const &src,
+		std::string const &chars = " \t\r\n\v\f");
+std::vector <std::string_view> split(std::string_view const &src,
+		int maxcuts = 1, std::string::size_type pos = 0,
+		std::string_view const &chars = " \t\r\n\v\f");
+bool startswith(std::string const &data, std::string const &needle,
+		std::string::size_type p = 0);
+bool endswith(std::string const &data, std::string const &needle,
+		std::string::size_type p = 0);
 std::string upper(std::string const &src);
 std::string lower(std::string const &src);
 
@@ -36,11 +61,14 @@ extern std::ostream *log_output;
 extern bool log_date;
 
 void set_log_output(std::ostream &target);
-void log_impl(std::string const &message, std::string const &filename, std::string const &funcname, int line);
-#define WL_log(msg) Webloop::log_impl(msg, __FILE__, __PRETTY_FUNCTION__, __LINE__)
+void log_impl(std::string const &message, std::string const &filename,
+		std::string const &funcname, int line);
+#define WL_log(msg) \
+	Webloop::log_impl(msg, __FILE__, __PRETTY_FUNCTION__, __LINE__)
 // }}}
 
-// Implementation of RFC4648 (base64) and sha1, for use within websocket communication.
+// Implementation of RFC4648 (base64) and sha1, for use within websocket
+// communication.
 // These are available with better performance from other libraries. However,
 // the performance is not relevant here and it's not much code. It is prefered
 // to avoid depending on other libraries when possible.

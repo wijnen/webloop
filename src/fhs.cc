@@ -25,6 +25,8 @@
 namespace Webloop {
 
 // Globals. {{{
+std::list <OptionBase *> OptionBase::all_options;
+
 std::vector <std::string> arguments;
 /// Flag that is set to true when fhs_init() is called.
 InitState initialized = UNINITIALIZED;
@@ -58,8 +60,6 @@ struct Info {
 static Info _info;
 static std::filesystem::path _temp_file_dir;
 // }}}
-
-std::list <OptionBase *> OptionBase::all_options;
 
 OptionBase::OptionBase(std::string const &name, std::string const &help, bool must_have_parameter, bool can_have_parameter, bool multiple, char shortopt, bool store) // {{{
 		: is_default(true), name(name), help(help), must_have_parameter(must_have_parameter), can_have_parameter(can_have_parameter), multiple(multiple), shortopt(shortopt)

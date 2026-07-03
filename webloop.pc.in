@@ -7,4 +7,4 @@ Name: webloop
 Description: fhs, network, websocket and mainloop system
 Version: @VERSION@
 Libs: -L${libdir} -lwebloop
-Cflags: -I${includedir}
+Cflags: -std=c++23 -I${includedir}

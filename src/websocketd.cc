@@ -15,6 +15,7 @@
 
 #include "webloop/websocketd.hh"
 
+#if 0
 namespace Webloop {
 std::map <int, char const *> http_response = { // {{{
 	// 1xx: informational
@@ -90,5 +91,6 @@ std::map <int, char const *> http_response = { // {{{
 	{511, "Network Authentication Required"}
 }; // }}}
 }
+#endif
 
 // vim: set fileencoding=utf-8 foldmethod=marker :

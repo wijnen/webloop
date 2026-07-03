@@ -37,6 +37,7 @@ sockets.  Connection targets can be specified in several ways.
 #include "webloop/webobject.hh"
 #include "webloop/network.hh"
 
+#if 0
 namespace Webloop {
 
 /* {{{ Interface description
@@ -57,9 +58,9 @@ namespace Webloop {
 // Read internals. {{{
 bool SocketBase::rawread_impl() { // {{{
 	STARTFUNC;
-	if (rawread_cb == nullptr)
+	if (my_settings.rawread_cb == nullptr)
 		return false;
-	(user->*rawread_cb)();
+	(my_settings.target->*(my_settings.rawread_cb))();
 	return true;
 } // }}}
 
@@ -71,9 +72,9 @@ bool SocketBase::read_impl() { // {{{
 		buffer += recv();
 	if (DEBUG > 3)
 		WL_log("new data; buffer:" + WebString(buffer).dump());
-	if (read_cb == nullptr)
+	if (my_settings.read_cb == nullptr)
 		return false;
-	(user->*read_cb)(buffer);
+	(my_settings.target->*(my_settings.read_cb))(buffer);
 	return true;
 } // }}}
 
@@ -83,7 +84,7 @@ bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
 		buffer = std::move(data);
 	else
 		buffer += data;
-	if (read_lines_cb == nullptr)
+	if (my_settings.read_lines_cb == nullptr)
 		return false;
 	auto p = buffer.find_first_of("\r\n");
 	while (p != std::string::npos) {
@@ -92,7 +93,7 @@ bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
 			buffer = buffer.substr(p + 2);
 		else
 			buffer = buffer.substr(p + 1);
-		(user->*read_lines_cb)(line);
+		(my_settings.target->*(my_settings.read_lines_cb))(line);
 		p = buffer.find_first_of("\r\n");
 	}
 	return true;
@@ -101,37 +102,6 @@ bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
 bool SocketBase::read_lines_impl() { // {{{
 	STARTFUNC;
 	return handle_read_line_data(recv());
-} // }}}
-
-void SocketBase::finish_move(SocketBase &&other) { // {{{
-	STARTFUNC;
-	if (server_data != std::list <SocketBase *>::iterator())
-		*server_data = this;
-	if (other.read_handle != current_loop->invalid_io()) {
-		//WL_log("resetting callback");
-		// Remove old read callback.
-		current_loop->remove_io(other.read_handle);
-		other.read_handle = current_loop->invalid_io();
-		other.fd = -1;
-		other.rawread_cb = SocketBase::RawReadType();
-		other.read_cb = SocketBase::ReadType();
-		other.read_lines_cb = SocketBase::ReadLinesType();
-
-		// Set new read callback.
-		CbType read;
-		if (rawread_cb != nullptr)
-			read = &SocketBase::rawread_impl;
-		else if (read_cb != nullptr)
-			read = &SocketBase::read_impl;
-		else if (read_lines_cb != nullptr)
-			read = &SocketBase::read_lines_impl;
-		else
-			throw "read_handle was valid, but no callback was set";
-
-		read_handle = current_loop->add_io(Loop::IoRecord(name, this, fd, POLLIN | POLLPRI, read, CbType(), &SocketBase::error_impl));
-	}
-	//else
-		//WL_log("not resetting callback");
 } // }}}
 
 std::string SocketBase::recv() { // {{{
@@ -161,11 +131,11 @@ std::string SocketBase::recv() { // {{{
 		return close();
 	}
 	if (num == 0) {
-		bool have_server = server;
+		bool have_server = server.get() != nullptr;
 		std::string ret = close();
 		if (DEBUG > 3)
 			WL_log("closed");
-		if (!disconnect_cb && !have_server)
+		if (!my_settings.disconnect_cb && !have_server)
 			throw "network connection closed";
 		return ret;
 	}
@@ -174,7 +144,9 @@ std::string SocketBase::recv() { // {{{
 // }}}
 
 // Constructor- and destructor-related. {{{
-SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, UserBase *user, Loop *loop) : // {{{
+SocketBase::SocketBase(std::string const &name, int new_fd, // {{{
+		URL const &address, SocketSettingsBase *settings, Loop *loop)
+	:
 		fd(new_fd),
 		maxsize(4096),
 		current_loop(Loop::get(loop)),
@@ -183,12 +155,7 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 		server(nullptr),
 		server_data(),
 		name(name),
-		user(user),
-		rawread_cb(nullptr),
-		read_cb(nullptr),
-		read_lines_cb(nullptr),
-		disconnect_cb(nullptr),
-		error_cb(nullptr),
+		my_settings(*settings),
 		url(address)
 {
 	STARTFUNC;
@@ -266,73 +233,6 @@ SocketBase::SocketBase(std::string const &name, int new_fd, URL const &address, 
 	}
 } // }}}
 
-SocketBase::SocketBase(std::string const &name) : // {{{
-		fd(-1),
-		maxsize(4096),
-		current_loop(Loop::get()),
-		read_handle(current_loop->invalid_io()),
-		buffer(),
-		server(nullptr),
-		server_data(),
-		name(name),
-		user(nullptr),
-		rawread_cb(nullptr),
-		read_cb(nullptr),
-		read_lines_cb(nullptr),
-		disconnect_cb(nullptr),
-		error_cb(nullptr),
-		url()
-{
-	STARTFUNC;
-	//WL_log("name " + name);
-} // }}}
-
-SocketBase::SocketBase(SocketBase &&other) : // {{{
-		fd(other.fd),
-		maxsize(other.maxsize),
-		current_loop(other.current_loop),
-		read_handle(current_loop->invalid_io()),
-		buffer(std::move(other.buffer)),
-		server(other.server),
-		server_data(other.server_data),
-		name(other.name),
-		user(other.user),
-		rawread_cb(other.rawread_cb),
-		read_cb(other.read_cb),
-		read_lines_cb(other.read_lines_cb),
-		disconnect_cb(other.disconnect_cb),
-		error_cb(other.error_cb),
-		url(std::move(other.url))
-{
-	STARTFUNC;
-	//WL_log("name " + name);
-	finish_move(std::move(other));
-} // }}}
-
-SocketBase &SocketBase::operator=(SocketBase &&other) { // {{{
-	STARTFUNC;
-	unread();
-	fd = other.fd;
-	maxsize = other.maxsize;
-	current_loop = other.current_loop;
-	read_handle = current_loop->invalid_io();
-	read_cb = other.read_cb;
-	buffer = std::move(other.buffer);
-	server = other.server;
-	server_data = other.server_data;
-	name = other.name;
-	disconnect_cb = other.disconnect_cb;
-	user = other.user;
-	rawread_cb = other.rawread_cb;
-	read_cb = other.read_cb;
-	read_lines_cb = other.read_lines_cb;
-	disconnect_cb = other.disconnect_cb;
-	error_cb = other.error_cb;
-	url = std::move(other.url);
-	finish_move(std::move(other));
-	return *this;
-} // }}}
-
 std::string SocketBase::close() { // {{{
 	STARTFUNC;
 	// Close the network connection.
@@ -342,11 +242,12 @@ std::string SocketBase::close() { // {{{
 	std::string pending = unread();
 	::close(fd);
 	fd = -1;
-	if (server)
-		server->remote_disconnect(this->server_data);
-	if (disconnect_cb != nullptr) {
-		assert(user != nullptr);
-		(user->*disconnect_cb)();
+	if (server) {
+		//server->remote_disconnect(this->server_data);
+	}
+	if (my_settings.disconnect_cb != nullptr) {
+		assert(my_settings.target != nullptr);
+		(my_settings.target->*(my_settings.disconnect_cb))();
 	}
 	return pending;
 } // }}}
@@ -364,20 +265,22 @@ void SocketBase::send(std::string const &data) { // {{{
 	if (DEBUG > 3)
 		WL_log("Sending: " + WebString(data).dump());
 	size_t p = 0;
-	while (p < data.size()) {
+	while (fd >= 0 && p < data.size()) {
 		ssize_t n = write(fd, &data[p], data.size() - p);
 		if (DEBUG > 4)
 			WL_log("written " + std::to_string(n) + " bytes");
 		if (n <= 0) {
 			std::cerr << "failed to write data to socket";
 			close();
+			return;
 		}
 		p += n;
 	}
 } // }}}
 
 // Reading. {{{
-std::string SocketBase::rawread_base(RawReadType callback) { // {{{
+std::string SocketBase::set_rawread(SocketSettingsBase::RawReadType callback)
+{ // {{{
 	STARTFUNC;
 	/* Register function to be called when data is ready for reading.
 	The function will be called when data is ready.  The callback
@@ -391,12 +294,13 @@ std::string SocketBase::rawread_base(RawReadType callback) { // {{{
 		return std::string();
 	std::string ret = unread();
 	rawread_cb = callback;
-	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
+	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI,
+		&SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
 	read_handle = current_loop->add_io(read_item);
 	return ret;
 } // }}}
 
-void SocketBase::read_base(ReadType callback) { // {{{
+void SocketBase::set_read(ReadType callback) { // {{{
 	STARTFUNC;
 	/* Register function to be called when data is received.
 	When data is available, read it and call this function.  The
@@ -419,10 +323,10 @@ void SocketBase::read_base(ReadType callback) { // {{{
 	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::read_impl, CbType(), &SocketBase::error_impl};
 	read_handle = current_loop->add_io(read_item);
 	if (!first.empty())
-		(user->*read_cb)(first);
+		(target->*read_cb)(first);
 } // }}}
 
-void SocketBase::read_lines_base(ReadLinesType callback) { // {{{
+void SocketBase::set_read_lines(ReadLinesType callback) { // {{{
 	STARTFUNC;
 	/* Buffer incoming data until a line is received, then call a function.
 	When a newline is received, all data up to that point is
@@ -626,6 +530,7 @@ ServerBase::ServerBase( // {{{
 	}
 } // }}}
 
+/*
 ServerBase::ServerBase(ServerBase &&other) : // {{{
 	listenloop(other.listenloop),
 	listeners(std::move(other.listeners)),
@@ -655,6 +560,7 @@ ServerBase &ServerBase::operator=(ServerBase &&other) { // {{{
 		l.server = this;
 	return *this;
 } // }}}
+*/
 
 void ServerBase::close() { // {{{
 	STARTFUNC;
@@ -668,5 +574,6 @@ void ServerBase::close() { // {{{
 // }}}
 
 }
+#endif
 
 // vim: set fileencoding=utf-8 foldmethod=marker :

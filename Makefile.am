@@ -56,27 +56,26 @@ JUNK = \
 webloop_HEADERS = \
 	include/webloop.hh
 webloopsub_HEADERS = \
-	include/webloop/coroutine.hh \
+	include/webloop/url.hh \
 	include/webloop/fhs.hh \
 	include/webloop/loop.hh \
 	include/webloop/network.hh \
 	include/webloop/tools.hh \
-	include/webloop/url.hh \
 	include/webloop/webobject.hh \
 	include/webloop/websocketd.hh
 
 libwebloop_la_SOURCES = $(webloop_HEADERS) $(webloopsub_HEADERS) \
-	src/coroutine.cc \
+	src/url.cc \
 	src/fhs.cc \
 	src/loop.cc \
 	src/network.cc \
 	src/tools.cc \
-	src/url.cc \
 	src/webobject.cc \
 	src/websocketd.cc
 
 libwebloop_la_CPPFLAGS = -Iinclude -Wall -Wextra -Werror -ggdb3 -std=c++23
-libwebloop_la_LDFLAGS = -Wl,--version-script -Wl,symbol-versions -version-info $(VERSION_CURRENT):$(VERSION_REVISION):$(VERSION_AGE) -Wl,--as-needed
+libwebloop_la_CXXFLAGS = -ffunction-sections -fdata-sections
+libwebloop_la_LDFLAGS = -Wl,--version-script -Wl,symbol-versions -version-info $(VERSION_CURRENT):$(VERSION_REVISION):$(VERSION_AGE) -Wl,--as-needed -Wl,--gc-sections
 libwebloop_la_LIBADD = -ldl -lpthread
 libwebloop_la_DEPENDENCIES = symbol-versions
 

@@ -52,8 +52,12 @@ URL::URL(std::string const &url) : src(url) {
 		p = q;
 	} // }}}
 	// Store path for explicit unix domain sockets.
-	if (scheme == "unix://")
-		unix = decode(host + path);	// this allows, but does not require, for slashes to be encoded. The purpose is to be able to encode the other special characters.
+	if (scheme == "unix://") {
+		// this allows, but does not require, for slashes to be
+		// encoded. The purpose is to be able to encode the other
+		// special characters.
+		unix = decode(host + path);
+	}
 	if (url[p] == ';') { // parameters. {{{
 		q = url.find_first_of("?#", p);
 		if (q == std::string::npos) {
@@ -105,22 +109,28 @@ std::string URL::build_request() { // {{{
 	return ret + encode(parameters, 1) + rawquery; // + encode(fragment, 1); The fragment probably should not be sent to the server.
 } // }}}
 
-std::string URL::encode(std::string const &src, std::string::size_type pos) { // {{{
+std::string URL::encode(std::string const &src, // {{{
+		std::string::size_type pos)
+{
 	// Replace URL parts by escape codes.
 	if (src.size() <= pos)
 		return src;
 	std::string ret = src.substr(0, pos);
 	for (auto i = pos; i < src.size(); ++i) {
 		auto c = src[i];
-		if (c <= 32 || c >= 127 || c == ':' || c == '/' || c == ';' || c == '?' || c == '#' || c == '&' || c == '%')
-			ret += (std::ostringstream() << "%" << std::hex << std::setfill('0') << std::setw(2) << (c & 0xff)).str();
-		else
+		if (c <= 32 || c >= 127 || c == ':' || c == '/' || c == ';' ||
+				c == '?' || c == '#' || c == '&' || c == '%') {
+			ret += (std::ostringstream() << "%" << std::hex <<
+					std::setfill('0') << std::setw(2) <<
+					(c & 0xff)).str();
+		} else {
 			ret += c;
+		}
 	}
 	return ret;
 } // }}}
 
-std::string URL::decode(std::string const &src) { // {{{
+std::string URL::decode(std::string_view const &src) { // {{{
 	std::string ret;
 	std::string::size_type pos = 0;
 	while (pos < src.size()) {
@@ -133,7 +143,8 @@ std::string URL::decode(std::string const &src) { // {{{
 			WL_log("Warning: decode found incomplete escape");
 		}
 		ret += src.substr(pos, q - pos);
-		ret += char(std::stoi(src.substr(q + 1, 2), nullptr, 16) & 0xff);
+		ret += char(svtoi(std::string_view(src).substr(q + 1, 2)) &
+				0xff);
 		pos = q + 3;
 	}
 	return ret;

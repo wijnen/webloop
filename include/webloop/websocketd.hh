@@ -37,13 +37,13 @@ proxy to this server just for the websocket.
 #include <filesystem>
 #include "network.hh"
 #include "webobject.hh"
-#include "coroutine.hh"
 #include "url.hh"
 #include "tools.hh"
 #include "loop.hh"
 #include "fhs.hh"
 // }}}
 
+#if 0
 namespace Webloop {
 
 /// This type is used for function arguments in RPC calls.
@@ -133,11 +133,9 @@ public:
 
 	coroutine wait_for_init() {
 		if (http_state != HTTP_DONE) {
-			std::cout << "yielding " << std::hex << (long)this << std::dec << std::endl;
 			init_waiter = GetHandle();
 			co_yield WebNone::create();
 		}
-		std::cout << "returning " << std::hex << (long)this << std::dec << std::endl;
 		co_return WebNone::create();
 	}
 
@@ -514,7 +512,6 @@ Websocket <UserType>::Websocket(Websocket <UserType> &&other) : // {{{
 	other.buffer.clear();
 	other.fragments.clear();
 	other.received_headers.clear();
-	WL_log("buffer moved");
 	if (!other.is_closed) {
 		if (run_settings.keepalive != Loop::Duration()) {
 			Loop::get(other.run_settings.loop)->remove_timeout(other.keepalive_handle);
@@ -852,7 +849,7 @@ private:
 	void create_connection(Socket <Connection> *socket);
 public:
 	Httpd(OwnerType *owner, std::string const &service, std::string const &htmldir = "html", Loop *loop = nullptr, int backlog = 5);
-	~Httpd() { STARTFUNC; WL_log("destructing http server " + std::to_string((long)this)); }
+	~Httpd() { STARTFUNC; }
 	// Move support.
 	Httpd(Httpd <OwnerType> &&src);
 	Httpd <OwnerType> &operator=(Httpd <OwnerType> &&src);
@@ -867,21 +864,22 @@ public:
 
 template <class OwnerType>
 void Httpd <OwnerType>::server_closed() { // {{{
-	WL_log("Server closed " + std::to_string((long)this));
 	if (closed_cb != nullptr)
 		(owner->*closed_cb)();
 } // }}}
 
 template <class OwnerType>
 void Httpd <OwnerType>::server_error(std::string const &message) { // {{{
-	WL_log("Error received by server " + std::to_string((long)this) + ": " + message);
+	if (DEBUG > 2)
+		WL_log("Error received by server " + std::to_string((long)this) + ": " + message);
 	if (error_cb != nullptr)
 		(owner->*error_cb)(message);
 } // }}}
 
 template <class OwnerType>
 void Httpd <OwnerType>::create_connection(Socket <Connection> *socket) { // {{{
-	WL_log("received new connection " + std::to_string((long)this));
+	if (DEBUG > 3)
+		WL_log("received new connection " + std::to_string((long)this));
 	connections.emplace_back(std::move(socket), this);
 } // }}}
 
@@ -902,7 +900,8 @@ Httpd <OwnerType>::Httpd(OwnerType *owner, std::string const &service, std::stri
 		keepalive(50s),
 		server(service, this, &Httpd <OwnerType>::create_connection, &Httpd <OwnerType>::server_closed, &Httpd <OwnerType>::server_error, loop, backlog)
 {
-	WL_log("created new http server " + std::to_string((long)this));
+	if (DEBUG > 2)
+		WL_log("created new http server " + std::to_string((long)this));
 	/* Create a webserver.
 	Additional arguments are passed to the network.Server.
 	@param port: Port to listen on.  Same format as in
@@ -982,13 +981,15 @@ Httpd <OwnerType>::Httpd(Httpd <OwnerType> &&src) : // {{{
 		server(std::move(src.server), this, &Httpd <OwnerType>::create_connection, &Httpd <OwnerType>::server_closed, &Httpd <OwnerType>::server_error)
 {
 	STARTFUNC;
-	WL_log("moving http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
+	if (DEBUG > 2)
+		WL_log("moving http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
 } // }}}
 
 template <class OwnerType>
 Httpd <OwnerType> &Httpd <OwnerType>::operator=(Httpd <OwnerType> &&src) { // {{{
 	STARTFUNC;
-	WL_log("move-assigning http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
+	if (DEBUG > 2)
+		WL_log("move-assigning http server " + std::to_string((long)&src) + " to " + std::to_string((long)this));
 	owner = std::move(src.owner);
 	service = std::move(src.service);
 	connections = std::move(src.connections);
@@ -1761,7 +1762,6 @@ public:
 template <class UserType>
 int RPC <UserType>::get_index() { // {{{
 	STARTFUNC;
-	WL_log("this: " + std::to_string((long)this));
 	++reply_index;
 	//print_expecting("creating reply index");
 	while (expecting_reply_bg.contains(reply_index) || expecting_reply_fg.contains(reply_index) || reply_index == 0)
@@ -2093,7 +2093,6 @@ coroutine RPC <UserType>::fgcall(std::string const &target, std::shared_ptr <Web
 		args = WebVector::create();
 	if (!kwargs)
 		kwargs = WebMap::create();
-	WL_log("this: " + std::to_string((long)this));
 	int index = get_index();
 	expecting_reply_fg[index] = GetHandle();
 	if (DEBUG > 4)
@@ -2109,6 +2108,7 @@ coroutine RPC <UserType>::fgcall(std::string const &target, std::shared_ptr <Web
 // }}}
 
 } 
+#endif
 
 #endif
 
