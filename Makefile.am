@@ -51,7 +51,8 @@ JUNK = \
 	ltmain.sh \
 	m4 \
 	Makefile.in \
-	missing
+	missing \
+	src/.deps
 
 webloop_HEADERS = \
 	include/webloop.hh

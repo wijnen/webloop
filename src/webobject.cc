@@ -439,20 +439,16 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 #endif
 // }}}
 
-coroutine WebCoroutinePointer::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+std::shared_ptr <WebObject> WebFunctionPointer::operator()
+	(std::shared_ptr <WebObject> args)
+{ // {{{
 	return target(args, merge(kwargs));
 } // }}}
 
-coroutine WebCoroutineMemberBase::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+std::shared_ptr <WebObject> WebMemberBase::operator()
+	(std::shared_ptr <WebObject> args)
+{ // {{{
 	return (object->*target)(args, merge(kwargs));
-} // }}}
-
-coroutine WebFunctionPointer::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
-	co_return target(args, merge(kwargs));
-} // }}}
-
-coroutine WebMemberBase::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
-	co_return (object->*target)(args, merge(kwargs));
 } // }}}
 
 // Operators. {{{
@@ -670,25 +666,12 @@ std::shared_ptr <WebObject> binary_map_string(WebObject &lhs, WebObject &rhs, ch
 	return l.value[std::string(r)];
 } // }}}
 
-static coroutine function_webfunctionpointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+static std::shared_ptr <WebObject> function_webfunctionpointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
 	WebFunctionPointer &f = *target.as <WebFunctionPointer>();
 	return f(args, kwargs);
 } // }}}
-static coroutine function_webcoroutinepointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
-	WebCoroutinePointer &f = *target.as <WebCoroutinePointer>();
-	return f(args, kwargs);
-} // }}}
-static coroutine function_webmemberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+static std::shared_ptr <WebObject> function_webmemberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
 	WebMemberBase &f = *target.as <WebMemberBase>();
-	return f(args, kwargs);
-} // }}}
-static coroutine function_webcoroutinememberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
-	WebCoroutineMemberBase &f = *target.as <WebCoroutineMemberBase>();
-	return f(args, kwargs);
-} // }}}
-
-static coroutine function_webcoroutine(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
-	WebCoroutine &f = *target.as <WebCoroutine>();
 	return f(args, kwargs);
 } // }}}
 
@@ -725,25 +708,44 @@ std::shared_ptr <WebObject> WebObject::binary_operator(WebObject &lhs, WebObject
 	return it->second(lhs, rhs, op);
 } // }}}
 
-std::shared_ptr <WebObject> WebObject::operator+(WebObject &rhs) { return binary_operator(*this, rhs, '+'); }
-std::shared_ptr <WebObject> WebObject::operator-(WebObject &rhs) { return binary_operator(*this, rhs, '-'); }
-std::shared_ptr <WebObject> WebObject::operator*(WebObject &rhs) { return binary_operator(*this, rhs, '*'); }
-std::shared_ptr <WebObject> WebObject::operator/(WebObject &rhs) { return binary_operator(*this, rhs, '/'); }
-std::shared_ptr <WebObject> WebObject::operator%(WebObject &rhs) { return binary_operator(*this, rhs, '%'); }
-std::shared_ptr <WebObject> WebObject::operator&(WebObject &rhs) { return binary_operator(*this, rhs, '&'); }
-std::shared_ptr <WebObject> WebObject::operator|(WebObject &rhs) { return binary_operator(*this, rhs, '|'); }
-std::shared_ptr <WebObject> WebObject::operator^(WebObject &rhs) { return binary_operator(*this, rhs, '^'); }
-std::shared_ptr <WebObject> WebObject::operator<<(WebObject &rhs) { return binary_operator(*this, rhs, '{'); }
-std::shared_ptr <WebObject> WebObject::operator>>(WebObject &rhs) { return binary_operator(*this, rhs, '}'); }
-std::shared_ptr <WebObject> WebObject::operator<(WebObject &rhs) { return binary_operator(*this, rhs, '<'); }
-std::shared_ptr <WebObject> WebObject::operator>(WebObject &rhs) { return binary_operator(*this, rhs, '>'); }
-std::shared_ptr <WebObject> WebObject::operator<=(WebObject &rhs) { return binary_operator(*this, rhs, ','); }
-std::shared_ptr <WebObject> WebObject::operator>=(WebObject &rhs) { return binary_operator(*this, rhs, '.'); }
-std::shared_ptr <WebObject> WebObject::operator==(WebObject &rhs) { return binary_operator(*this, rhs, '='); }
-std::shared_ptr <WebObject> WebObject::operator!=(WebObject &rhs) { return binary_operator(*this, rhs, '!'); }
-std::shared_ptr <WebObject> WebObject::operator[](WebObject &rhs) { return binary_operator(*this, rhs, '['); }
+std::shared_ptr <WebObject> WebObject::operator+(WebObject &rhs)
+{ return binary_operator(*this, rhs, '+'); }
+std::shared_ptr <WebObject> WebObject::operator-(WebObject &rhs)
+{ return binary_operator(*this, rhs, '-'); }
+std::shared_ptr <WebObject> WebObject::operator*(WebObject &rhs)
+{ return binary_operator(*this, rhs, '*'); }
+std::shared_ptr <WebObject> WebObject::operator/(WebObject &rhs)
+{ return binary_operator(*this, rhs, '/'); }
+std::shared_ptr <WebObject> WebObject::operator%(WebObject &rhs)
+{ return binary_operator(*this, rhs, '%'); }
+std::shared_ptr <WebObject> WebObject::operator&(WebObject &rhs)
+{ return binary_operator(*this, rhs, '&'); }
+std::shared_ptr <WebObject> WebObject::operator|(WebObject &rhs)
+{ return binary_operator(*this, rhs, '|'); }
+std::shared_ptr <WebObject> WebObject::operator^(WebObject &rhs)
+{ return binary_operator(*this, rhs, '^'); }
+std::shared_ptr <WebObject> WebObject::operator<<(WebObject &rhs)
+{ return binary_operator(*this, rhs, '{'); }
+std::shared_ptr <WebObject> WebObject::operator>>(WebObject &rhs)
+{ return binary_operator(*this, rhs, '}'); }
+std::shared_ptr <WebObject> WebObject::operator<(WebObject &rhs)
+{ return binary_operator(*this, rhs, '<'); }
+std::shared_ptr <WebObject> WebObject::operator>(WebObject &rhs)
+{ return binary_operator(*this, rhs, '>'); }
+std::shared_ptr <WebObject> WebObject::operator<=(WebObject &rhs)
+{ return binary_operator(*this, rhs, ','); }
+std::shared_ptr <WebObject> WebObject::operator>=(WebObject &rhs)
+{ return binary_operator(*this, rhs, '.'); }
+std::shared_ptr <WebObject> WebObject::operator==(WebObject &rhs)
+{ return binary_operator(*this, rhs, '='); }
+std::shared_ptr <WebObject> WebObject::operator!=(WebObject &rhs)
+{ return binary_operator(*this, rhs, '!'); }
+std::shared_ptr <WebObject> WebObject::operator[](WebObject &rhs)
+{ return binary_operator(*this, rhs, '['); }
 
-coroutine WebObject::operator()(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+std::shared_ptr <WebObject> WebObject::operator()
+	(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs)
+{ // {{{
 	auto it = WebObject::function_operator_registry.find(get_type());
 	if (it == WebObject::function_operator_registry.end())
 		throw "calling undefined function operator";
@@ -755,7 +757,8 @@ coroutine WebObject::operator()(std::shared_ptr <WebObject> args, std::shared_pt
 } // }}}
 // }}}
 
-std::shared_ptr <WebObject> WebCallable::merge(std::shared_ptr <WebObject> kwargs) const { // {{{
+std::shared_ptr <WebObject>
+WebCallable::merge(std::shared_ptr <WebObject> kwargs) const { // {{{
 	if (bound == nullptr)
 		return kwargs;
 	return *bound | *kwargs;
