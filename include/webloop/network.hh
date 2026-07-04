@@ -70,6 +70,19 @@ namespace Webloop {
 // implementation:
 // - Server: listener, creating Sockets on accept
 // - Socket: used for connection; symmetric
+
+// At application level, a class is made which wraps the socket.
+// It registers member functions that are called when events happen.
+// Events that can be registered are:
+// - Data is ready for reading. (Or for servers, accepting.): raw_read
+// - Data has been read: read
+// - A line of data has been read: read_done
+// - The socket is ready to write data: write
+// - Data has been written: write_done
+// - The socket was disconnected: disconnected
+// This happens through a template class that is used as the base class.
+// The socket is not a template and it can be transferred to another
+// application class object, even one of another type.
 // }}} */
 
 class ServerBase;
@@ -239,7 +252,7 @@ public:
 
 	// Write data.
 	// TODO: Sending data on a socket is currently blocking;
-	// TODO: it should instead be possible as coroutine and with callback.
+	// TODO: it should instead be possible with callback.
 	void send(std::string const &data);
 
 	// Read event scheduling.
