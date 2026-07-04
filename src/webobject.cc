@@ -442,13 +442,13 @@ std::shared_ptr <WebObject> WebObject::load(std::string const &data) { // {{{
 std::shared_ptr <WebObject> WebFunctionPointer::operator()
 	(std::shared_ptr <WebObject> args)
 { // {{{
-	return target(args, merge(kwargs));
+	return target(args, bound);
 } // }}}
 
 std::shared_ptr <WebObject> WebMemberBase::operator()
 	(std::shared_ptr <WebObject> args)
 { // {{{
-	return (object->*target)(args, merge(kwargs));
+	return (object->*target)(args, bound);
 } // }}}
 
 // Operators. {{{
@@ -666,13 +666,17 @@ std::shared_ptr <WebObject> binary_map_string(WebObject &lhs, WebObject &rhs, ch
 	return l.value[std::string(r)];
 } // }}}
 
-static std::shared_ptr <WebObject> function_webfunctionpointer(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+static std::shared_ptr <WebObject>
+function_webfunctionpointer(WebObject &target, std::shared_ptr <WebObject> args)
+{ // {{{
 	WebFunctionPointer &f = *target.as <WebFunctionPointer>();
-	return f(args, kwargs);
+	return f(args);
 } // }}}
-static std::shared_ptr <WebObject> function_webmemberbase(WebObject &target, std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs) { // {{{
+static std::shared_ptr <WebObject>
+function_webmemberbase(WebObject &target, std::shared_ptr <WebObject> args)
+{ // {{{
 	WebMemberBase &f = *target.as <WebMemberBase>();
-	return f(args, kwargs);
+	return f(args);
 } // }}}
 
 std::map <int, WebObject::unary_operator_impl> WebObject::unary_operator_registry = { // {{{
@@ -688,10 +692,7 @@ std::map <uint64_t, WebObject::binary_operator_impl> WebObject::binary_operator_
 }; // }}}
 std::map <int, WebObject::function_operator_impl> WebObject::function_operator_registry = { // {{{
 	{WebFunctionPointer::object_type, function_webfunctionpointer},
-	{WebCoroutinePointer::object_type, function_webcoroutinepointer},
-	{WebCoroutine::object_type, function_webcoroutine},
 	{WebMemberBase::object_type, function_webmemberbase},
-	{WebCoroutineMemberBase::object_type, function_webcoroutinememberbase}
 }; // }}}
 
 void WebObject::register_unary_operators(int type, unary_operator_impl impl) { // {{{
@@ -743,26 +744,17 @@ std::shared_ptr <WebObject> WebObject::operator!=(WebObject &rhs)
 std::shared_ptr <WebObject> WebObject::operator[](WebObject &rhs)
 { return binary_operator(*this, rhs, '['); }
 
-std::shared_ptr <WebObject> WebObject::operator()
-	(std::shared_ptr <WebObject> args, std::shared_ptr <WebObject> kwargs)
+std::shared_ptr <WebObject>
+WebObject::operator()(std::shared_ptr <WebObject> args)
 { // {{{
 	auto it = WebObject::function_operator_registry.find(get_type());
 	if (it == WebObject::function_operator_registry.end())
 		throw "calling undefined function operator";
 	if (args == nullptr)
-		args = WV();
-	if (kwargs == nullptr)
-		kwargs = WM();
-	return it->second(*this, args, kwargs);
+		args = WN();
+	return it->second(*this, args);
 } // }}}
 // }}}
-
-std::shared_ptr <WebObject>
-WebCallable::merge(std::shared_ptr <WebObject> kwargs) const { // {{{
-	if (bound == nullptr)
-		return kwargs;
-	return *bound | *kwargs;
-} // }}}
 
 }
 

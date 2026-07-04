@@ -356,10 +356,9 @@ template <class T> WebHelper::WebHelper(std::shared_ptr <T> src) : data(dynamic_
 // These can only be used with "using namespace Webloop::Literals",
 // or "using namespace Webloop".
 namespace Literals { // {{{
-static inline std::shared_ptr <WebBool> operator ""_wb(char const *src, size_t size) {
-	(void)&size;
-	assert((size == 4 && src[0] == 't' && src[1] == 'r' && src[2] == 'u' && src[3] == 'e') || (size == 5 && src[0] == 'f' && src[1] == 'a' && src[2] == 'l' && src[3] == 's' && src[4] == 'e'));
-	return WebBool::create(src[0] == 't');
+static inline std::shared_ptr <WebBool> operator ""_wb(unsigned long long b) {
+	assert(b <= 1);
+	return WebBool::create(b == 1);
 }
 static inline std::shared_ptr <WebInt> operator ""_wi(unsigned long long src) { return WebInt::create(src); }
 static inline std::shared_ptr <WebFloat> operator ""_wf(long double src) { return WebFloat::create(src); }
@@ -390,15 +389,14 @@ protected:
 	std::shared_ptr <WebObject> bound;
 	WebCallable(int object_type, std::shared_ptr <WebObject> b)
 		: WebObject(object_type), bound(b) {}
-	std::shared_ptr <WebObject>
-		merge(std::shared_ptr <WebObject> kwargs) const;
 }; // }}}
 
 // This class contains a pointer to a regular (non-member) function.
 class WebFunctionPointer : public WebCallable { // {{{
 private:
 	typedef std::shared_ptr <WebObject> (*Target)
-		(std::shared_ptr <WebObject> args);
+		(std::shared_ptr <WebObject> args,
+			std::shared_ptr <WebObject> bound);
 	Target target;
 	// Construction
 	WebFunctionPointer(Target t, std::shared_ptr <WebObject> b) : WebCallable(object_type, b), target(t) {}
@@ -412,7 +410,11 @@ public:
 		return std::shared_ptr <WebObject>
 			(new WebFunctionPointer(target, bound));
 	}
-	std::string print() const override { return "C++ Function wrapper"; }
+	std::string print() const override
+	{
+		return std::format("C++ Function wrapper; bound = {}",
+				bound->print());
+	}
 
 	// Construction
 	static std::shared_ptr <WebObject> create(Target t,
@@ -431,7 +433,8 @@ class MemberOwner {};
 class WebMemberBase : public WebCallable { // {{{
 protected:
 	typedef std::shared_ptr <WebObject> (MemberOwner::*Target)
-		(std::shared_ptr <WebObject> args);
+		(std::shared_ptr <WebObject> args,
+			std::shared_ptr <WebObject> bound);
 	MemberOwner *object;
 private:
 	Target target;
@@ -464,7 +467,8 @@ template <class Base>
 class WebMemberPointer : public WebMemberBase { // {{{
 public:
 	typedef std::shared_ptr <WebObject>
-		(Base::*RealTarget)(std::shared_ptr <WebObject> args);
+		(Base::*RealTarget)(std::shared_ptr <WebObject> args,
+				std::shared_ptr <WebObject> bound);
 private:
 	WebMemberPointer(Base *o, RealTarget t, std::shared_ptr <WebObject> b)
 		: WebMemberBase(reinterpret_cast <MemberOwner *>(o),
