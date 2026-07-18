@@ -37,7 +37,6 @@ sockets.  Connection targets can be specified in several ways.
 #include "webloop/webobject.hh"
 #include "webloop/network.hh"
 
-#if 0
 namespace Webloop {
 
 /* {{{ Interface description
@@ -56,55 +55,64 @@ namespace Webloop {
 
 // Network sockets. {{{
 // Read internals. {{{
-bool SocketBase::rawread_impl() { // {{{
+bool SocketBase::raw_read_impl()
+{ // {{{
 	STARTFUNC;
-	if (my_settings.rawread_cb == nullptr)
+	if (m_raw_read_cb == nullptr || m_target == nullptr) {
+		WL_log(std::format("raw cb: {}; target: {}", (bool)m_raw_read_cb, (bool)m_target));
 		return false;
-	(my_settings.target->*(my_settings.rawread_cb))();
+	}
+	(m_target->*m_raw_read_cb)();
 	return true;
 } // }}}
 
-bool SocketBase::read_impl() { // {{{
+bool SocketBase::read_impl()
+{ // {{{
 	STARTFUNC;
-	if (buffer.empty())
-		buffer = recv();	// Allow moving.
+	if (m_buffer.empty())
+		m_buffer = recv();	// Allow moving.
 	else
-		buffer += recv();
+		m_buffer += recv();
 	if (DEBUG > 3)
-		WL_log("new data; buffer:" + WebString(buffer).dump());
-	if (my_settings.read_cb == nullptr)
+		WL_log("new data; buffer:" + WebString(m_buffer).dump());
+	if (m_read_cb == nullptr)
 		return false;
-	(my_settings.target->*(my_settings.read_cb))(buffer);
+	(m_target->*m_read_cb)(m_buffer);
 	return true;
 } // }}}
 
-bool SocketBase::handle_read_line_data(std::string &&data) { // {{{
+bool SocketBase::handle_read_line_data(std::string &&data)
+{ // {{{
 	STARTFUNC;
-	if (buffer.empty())
-		buffer = std::move(data);
+	if (m_buffer.empty())
+		m_buffer = std::move(data);
 	else
-		buffer += data;
-	if (my_settings.read_lines_cb == nullptr)
+		m_buffer += data;
+	if (m_read_lines_cb == nullptr)
 		return false;
-	auto p = buffer.find_first_of("\r\n");
+	auto p = m_buffer.find_first_of("\r\n");
 	while (p != std::string::npos) {
-		std::string line = buffer.substr(0, p);
-		if (buffer[p] == '\r' && p + 1 < buffer.size() && buffer[p + 1] == '\n')
-			buffer = buffer.substr(p + 2);
-		else
-			buffer = buffer.substr(p + 1);
-		(my_settings.target->*(my_settings.read_lines_cb))(line);
-		p = buffer.find_first_of("\r\n");
+		std::string line = m_buffer.substr(0, p);
+		if (m_buffer[p] == '\r' && p + 1 < m_buffer.size() &&
+				m_buffer[p + 1] == '\n') {
+			m_buffer = m_buffer.substr(p + 2);
+		} else {
+			m_buffer = m_buffer.substr(p + 1);
+		}
+		(m_target->*m_read_lines_cb)(line);
+		p = m_buffer.find_first_of("\r\n");
 	}
 	return true;
 } // }}}
 
-bool SocketBase::read_lines_impl() { // {{{
+bool SocketBase::read_lines_impl()
+{ // {{{
 	STARTFUNC;
 	return handle_read_line_data(recv());
 } // }}}
 
-std::string SocketBase::recv() { // {{{
+std::string SocketBase::recv()
+{ // {{{
 	STARTFUNC;
 	/* Read data from the network.
 	Data is read from the network.  If the socket is not set to
@@ -112,54 +120,87 @@ std::string SocketBase::recv() { // {{{
 	will return a short read if limited data is available.  The
 	read data is returned as a bytes object.  If TLS is enabled,
 	more than maxsize bytes may be returned.  On EOF, the socket is
-	closed and if disconnect_cb is not set, an EOFError is raised.
+	closed and if disconnected_cb is not set, an EOFError is raised.
 	@param maxsize: passed to the underlaying recv call.  If TLS is
 		enabled, no data is left pending, which means that more
 		than maxsize bytes can be returned.
 	@return The received data as a bytes object.
 	*/
-	if (fd < 0) {
+	if (m_in_fd < 0) {
 		WL_log("recv on closed socket");
 		throw "recv on closed socket";
 	}
-	char buffer[maxsize];
-	auto num = ::read(fd, buffer, maxsize);
+	WL_log(std::format("recv on fd {}, size {}", m_in_fd, m_maxsize));
+	char *buffer = new char[m_maxsize];
+	auto num = ::read(m_in_fd, buffer, m_maxsize);
 	if (num < 0) {
 		if (errno == EWOULDBLOCK || errno == EAGAIN)
 			return std::string();
 		WL_log(std::string("Error reading from socket: ") + strerror(errno));
+		delete[] buffer;
 		return close();
 	}
 	if (num == 0) {
-		bool have_server = server.get() != nullptr;
+		bool have_server = m_server.get() != nullptr;
 		std::string ret = close();
 		if (DEBUG > 3)
 			WL_log("closed");
-		if (!my_settings.disconnect_cb && !have_server)
+		if (!m_disconnected_cb && !have_server)
 			throw "network connection closed";
+		delete[] buffer;
 		return ret;
 	}
-	return std::string(buffer, num);
+	std::string ret(buffer, num);
+	delete[] buffer;
+	return ret;
 } // }}}
 // }}}
 
 // Constructor- and destructor-related. {{{
-SocketBase::SocketBase(std::string const &name, int new_fd, // {{{
-		URL const &address, SocketSettingsBase *settings, Loop *loop)
+// Constructors. {{{
+SocketBase::SocketBase(std::string const &name, Loop *loop)
 	:
-		fd(new_fd),
-		maxsize(4096),
-		current_loop(Loop::get(loop)),
-		read_handle(current_loop->invalid_io()),
-		buffer(),
-		server(nullptr),
-		server_data(),
-		name(name),
-		my_settings(*settings),
-		url(address)
+		m_in_fd(-1), m_out_fd(-1),
+		m_maxsize(4096),
+		m_current_loop(Loop::get(loop)),
+		m_read_handle(m_current_loop->invalid_io()),
+		m_target(nullptr),
+		m_raw_read_cb(nullptr),
+		m_read_cb(nullptr),
+		m_read_lines_cb(nullptr),
+		m_written_cb(nullptr),
+		m_connected_cb(nullptr),
+		m_disconnected_cb(nullptr),
+		m_error_cb(nullptr),
+		m_buffer{},
+		m_server(nullptr),
+		m_server_data{},
+		m_name(name),
+		m_url{}
+{}
+
+SocketBase::SocketBase(std::string const &name, URL const &address, Loop *loop)
+	:
+		m_in_fd(-1), m_out_fd(-1),
+		m_maxsize(4096),
+		m_current_loop(Loop::get(loop)),
+		m_read_handle(m_current_loop->invalid_io()),
+		m_target(nullptr),
+		m_raw_read_cb(nullptr),
+		m_read_cb(nullptr),
+		m_read_lines_cb(nullptr),
+		m_written_cb(nullptr),
+		m_connected_cb(nullptr),
+		m_disconnected_cb(nullptr),
+		m_error_cb(nullptr),
+		m_buffer(),
+		m_server(nullptr),
+		m_server_data(),
+		m_name(name),
+		m_url{}
 {
 	STARTFUNC;
-	//WL_log("name " + name);
+	//WL_log("name " + m_name);
 	/* Create a connection.
 	@param address: connection target.  This is a unix domain
 	socket if there is a / in it.  If it is not a unix domain
@@ -167,119 +208,127 @@ SocketBase::SocketBase(std::string const &name, int new_fd, // {{{
 	prefixed with a hostname and a :.  If no hostname is present,
 	localhost is used.
 	*/
-	
-	// Only connect to url if fd is invalid.
-	if (fd >= 0)
-		return;
+	open(address);
+}
+// }}}
 
-	//WL_log("connecting to " + url.print());
+void SocketBase::open(int in_fd, int out_fd)
+{ // {{{
+	close();
+	m_in_fd = in_fd;
+	m_out_fd = out_fd;
+} // }}}
 
-	if (url.unix.empty() && url.service.empty()) {
-		url.service = std::move(url.host);
-		url.host = "localhost";
+void SocketBase::open(URL const &address)
+{ // {{{
+	WL_log("connecting to " + m_url.print());
+
+	m_url = address;
+	if (m_url.unix.empty() && m_url.service.empty()) {
+		m_url.service = std::move(m_url.host);
+		m_url.host = "localhost";
 	}
 
 	// Set up the connection.
-	if (!url.unix.empty()) {
+	if (!m_url.unix.empty()) {
 		// Unix domain socket.
-		fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		m_in_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, url.unix.c_str(), sizeof(addr.sun_path) - 1);
-		connect(fd, reinterpret_cast <sockaddr *>(&addr), sizeof(addr));
-	}
-	else {
+		size_t maxlen = sizeof(addr.sun_path) - 1;
+		strncpy(addr.sun_path, m_url.unix.c_str(), maxlen);
+		connect(m_in_fd, reinterpret_cast <sockaddr *>(&addr), sizeof(addr));
+	} else {
 		struct addrinfo addr_hint;
 		addr_hint.ai_family = AF_UNSPEC;
 		addr_hint.ai_socktype = SOCK_STREAM;
 		addr_hint.ai_protocol = IPPROTO_TCP;
 		addr_hint.ai_flags = AI_ADDRCONFIG | AI_V4MAPPED;
 		struct addrinfo *addr;
-		int code = getaddrinfo(url.host.c_str(), url.service.c_str(), &addr_hint, &addr);
+		int code = getaddrinfo(m_url.host.c_str(), m_url.service.c_str(),
+				&addr_hint, &addr);
 		if (code != 0) {
-			std::cerr << url.src << std::endl;
-			std::cerr << "unable to open socket: " << gai_strerror(code) << std::endl;
+			std::cerr << m_url.src << std::endl;
+			std::cerr << "unable to open socket: " <<
+				gai_strerror(code) << std::endl;
 			throw "unable to open socket";
 		}
-		fd = -1;
+		m_in_fd = -1;
 		for (auto rp = addr; rp; rp = rp->ai_next) {
-			fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-			if (DEBUG > 3)
-				WL_log("attempt to connect; fd = " + std::to_string(fd));
-			if (fd < 0) {
-				std::cerr << "unable to open socket: " << strerror(errno) << std::endl;
+			m_in_fd = socket(rp->ai_family, rp->ai_socktype,
+					rp->ai_protocol);
+			if (DEBUG > 3) {
+				WL_log("attempt to connect; fd = " +
+						std::to_string(m_in_fd));
+			}
+			if (m_in_fd < 0) {
+				std::cerr << "unable to open socket: " <<
+					strerror(errno) << std::endl;
 				continue;
 			}
-			if (connect(fd, rp->ai_addr, rp->ai_addrlen) < 0) {
+			if (connect(m_in_fd, rp->ai_addr, rp->ai_addrlen) < 0) {
+				std::cerr << "Fail: " << m_url.src << std::endl;
 				if (!rp->ai_next || errno != ECONNREFUSED) {
-					std::cerr << url.src << std::endl;
-					std::cerr << "unable to connect socket: " << strerror(errno) << std::endl;
+					std::cerr <<
+						"Unable to connect socket: " <<
+						strerror(errno) << std::endl;
 				}
-				fd = -1;
+				::close(m_in_fd);
+				m_in_fd = -1;
 				continue;
 			}
 			break;
 		}
 		freeaddrinfo(addr);
-		if (fd < 0) {
-			std::cerr << "unable to connect any socket" << std::endl;
+		if (m_in_fd < 0) {
+			std::cerr << "unable to connect any socket" <<
+				std::endl;
 			throw "unable to connect any socket";
 		}
 	}
-	int flags = fcntl(fd, F_GETFL);
-	if (flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-		std::cerr << "unable to set socket to nonblocking: " << strerror(errno) << std::endl;
+	m_out_fd = m_in_fd;
+	int flags = fcntl(m_in_fd, F_GETFL);
+	if (flags == -1 || fcntl(m_in_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+		std::cerr << "unable to set socket to nonblocking: " <<
+			strerror(errno) << std::endl;
 		throw "unable to set socket to nonblocking";
+	}
+	if (m_connected_cb != nullptr) {
+		assert(m_target != nullptr);
+		(m_target->*m_connected_cb)();
 	}
 } // }}}
 
-std::string SocketBase::close() { // {{{
+std::string SocketBase::close()
+{ // {{{
 	STARTFUNC;
 	// Close the network connection.
 	// @return The data that was remaining in the line buffer, if any.
-	if (fd < 0)
+
+	if (m_out_fd >= 0) {
+		::close(m_out_fd);
+		m_out_fd = -1;
+	}
+
+	if (m_in_fd < 0)
 		return "";
+
 	std::string pending = unread();
-	::close(fd);
-	fd = -1;
-	if (server) {
+	::close(m_in_fd);
+	m_in_fd = -1;
+	if (m_server) {
 		//server->remote_disconnect(this->server_data);
 	}
-	if (my_settings.disconnect_cb != nullptr) {
-		assert(my_settings.target != nullptr);
-		(my_settings.target->*(my_settings.disconnect_cb))();
+	if (m_disconnected_cb != nullptr) {
+		assert(m_target != nullptr);
+		(m_target->*m_disconnected_cb)();
 	}
 	return pending;
 } // }}}
 // }}}
 
-void SocketBase::send(std::string const &data) { // {{{
-	STARTFUNC;
-	/* Send data over the network.
-	Send data over the network.  Block until all data is in the buffer.
-	@param data: data to write.  This should be of type bytes.
-	@return None.
-	*/
-	if (fd < 0)
-		return;
-	if (DEBUG > 3)
-		WL_log("Sending: " + WebString(data).dump());
-	size_t p = 0;
-	while (fd >= 0 && p < data.size()) {
-		ssize_t n = write(fd, &data[p], data.size() - p);
-		if (DEBUG > 4)
-			WL_log("written " + std::to_string(n) + " bytes");
-		if (n <= 0) {
-			std::cerr << "failed to write data to socket";
-			close();
-			return;
-		}
-		p += n;
-	}
-} // }}}
-
 // Reading. {{{
-std::string SocketBase::set_rawread(SocketSettingsBase::RawReadType callback)
+std::string SocketBase::handle_raw_read(RawReadType callback)
 { // {{{
 	STARTFUNC;
 	/* Register function to be called when data is ready for reading.
@@ -290,17 +339,21 @@ std::string SocketBase::set_rawread(SocketSettingsBase::RawReadType callback)
 	@param error: function to be called if there is an error on the socket.
 	@return The data that was remaining in the line buffer, if any.
 	*/
-	if (fd < 0)
+	if (m_raw_read_cb == callback)
+		return std::string();
+	if (m_in_fd < 0)
 		return std::string();
 	std::string ret = unread();
-	rawread_cb = callback;
-	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI,
-		&SocketBase::rawread_impl, CbType(), &SocketBase::error_impl};
-	read_handle = current_loop->add_io(read_item);
+	WL_log("raw read");
+	m_raw_read_cb = callback;
+	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
+		&SocketBase::raw_read_impl, CbType(), &SocketBase::error_impl};
+	m_read_handle = m_current_loop->add_io(read_item);
 	return ret;
 } // }}}
 
-void SocketBase::set_read(ReadType callback) { // {{{
+void SocketBase::handle_read(ReadType callback, size_t maxsize)
+{ // {{{
 	STARTFUNC;
 	/* Register function to be called when data is received.
 	When data is available, read it and call this function.  The
@@ -314,19 +367,25 @@ void SocketBase::set_read(ReadType callback) { // {{{
 	@return None.
 	*/
 	if (DEBUG > 4)
-		WL_log("fd:" + std::to_string(fd));
-	if (fd < 0)
+		WL_log("fd:" + std::to_string(m_in_fd));
+	if (m_read_cb == callback)
+		return;
+	if (m_in_fd < 0)
 		return;
 	std::string first = unread();
-	maxsize = maxsize;
-	read_cb = callback;
-	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::read_impl, CbType(), &SocketBase::error_impl};
-	read_handle = current_loop->add_io(read_item);
+	WL_log("read");
+	if (maxsize > 0)
+		m_maxsize = maxsize;
+	m_read_cb = callback;
+	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
+		&SocketBase::read_impl, CbType(), &SocketBase::error_impl};
+	m_read_handle = m_current_loop->add_io(read_item);
 	if (!first.empty())
-		(target->*read_cb)(first);
+		(m_target->*m_read_cb)(first);
 } // }}}
 
-void SocketBase::set_read_lines(ReadLinesType callback) { // {{{
+void SocketBase::handle_read_lines(ReadLinesType callback, size_t maxsize)
+{ // {{{
 	STARTFUNC;
 	/* Buffer incoming data until a line is received, then call a function.
 	When a newline is received, all data up to that point is
@@ -340,40 +399,89 @@ void SocketBase::set_read_lines(ReadLinesType callback) { // {{{
 	not a limit on the line length.
 	@return None.
 	*/
-	if (fd < 0)
+	if (m_read_lines_cb == callback)
+		return;
+	if (m_in_fd < 0)
 		return;
 	std::string first = unread();
-	maxsize = maxsize;
-	read_lines_cb = callback;
-	Loop::IoRecord read_item {name, this, fd, POLLIN | POLLPRI, &SocketBase::read_lines_impl, CbType(), &SocketBase::error_impl};
-	read_handle = current_loop->add_io(read_item);
+	WL_log("read lines");
+	if (maxsize > 0)
+		m_maxsize = maxsize;
+	m_read_lines_cb = callback;
+	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
+		&SocketBase::read_lines_impl, CbType(),
+		&SocketBase::error_impl};
+	m_read_handle = m_current_loop->add_io(read_item);
 	if (!first.empty())
 		handle_read_line_data(std::move(first));
 } // }}}
 
-std::string SocketBase::unread() { // {{{
+std::string SocketBase::unread()
+{ // {{{
 	STARTFUNC;
-	/* Cancel a read() or rawread() callback.
+	/* Cancel a read() or raw_read() callback.
 	Cancel any read callback.
 	@return Bytes left in the line buffer, if any.  The line buffer
 		is cleared.
 	*/
 	//WL_log("unreading");
-	if (read_handle != current_loop->invalid_io()) {
-		//WL_log("unreading active");
-		current_loop->remove_io(read_handle);
-		read_handle = current_loop->invalid_io();
-		rawread_cb = SocketBase::RawReadType();
-		read_cb = SocketBase::ReadType();
-		read_lines_cb = SocketBase::ReadLinesType();
+	if (m_read_handle != m_current_loop->invalid_io()) {
+		WL_log("unreading active");
+		m_current_loop->remove_io(m_read_handle);
+		m_read_handle = m_current_loop->invalid_io();
+		m_raw_read_cb = nullptr;
+		m_read_cb = nullptr;
+		m_read_lines_cb = nullptr;
+	} else {
+		WL_log("not unreading");
 	}
-	std::string ret = std::move(buffer);
-	buffer.clear();
+	std::string ret = std::move(m_buffer);
+	m_buffer.clear();
 	return ret;
+} // }}}
+// }}}
+
+// Writing. {{{
+void SocketBase::send(std::string const &data)
+{ // {{{
+	STARTFUNC;
+	/* Send data over the network.
+	Send data over the network.  Block until all data is in the buffer.
+	// TODO: Do not block.
+	@param data: data to write.  This should be of type bytes.
+	@return None.
+	*/
+	if (m_out_fd < 0)
+		return;
+	if (DEBUG > 3)
+		WL_log("Sending: " + WebString(data).dump());
+	size_t p = 0;
+	while (m_out_fd >= 0 && p < data.size()) {
+		ssize_t n = write(m_out_fd, &data[p], data.size() - p);
+		if (DEBUG > 4)
+			WL_log("written " + std::to_string(n) + " bytes");
+		if (n <= 0) {
+			std::cerr << "failed to write data to socket";
+			close();
+			return;
+		}
+		p += n;
+	}
+	if (m_written_cb) {
+		assert(m_target);
+		(m_target->*m_written_cb)();
+	}
+} // }}}
+
+void SocketBase::unwritten()
+{ // {{{
+	// TODO: implement non-blocking write.
+	m_written_cb = nullptr;
 } // }}}
 // }}}
 // }}}
 
+#if 0
 // Network server. {{{
 void ServerBase::remote_disconnect(std::list <SocketBase *>::iterator socket) { // {{{
 	STARTFUNC;
@@ -459,7 +567,7 @@ void ServerBase::Listener::accept_remote() { // {{{
 		addrlen = sizeof(addr);
 	}
 	// Create a generic socket; move it to the correct type later.
-	Socket <SocketBase::UserBase> remote("incoming on " + name, new_fd, nullptr);
+	Socket <SocketBase::UserBase> remote("incoming on " + m_name, new_fd, nullptr);
 	server->remotes.push_back(&remote);
 	remote.server = server;
 	remote.server_data = --server->remotes.end();
@@ -526,7 +634,7 @@ ServerBase::ServerBase( // {{{
 	STARTFUNC;
 	open_socket(service, backlog);
 	for (auto i = listeners.begin(); i != listeners.end(); ++i) {
-		i->socket.rawread(&Listener::accept_remote);
+		i->socket.raw_read(&Listener::accept_remote);
 	}
 } // }}}
 
@@ -572,8 +680,8 @@ void ServerBase::close() { // {{{
 	}
 } // }}}
 // }}}
+#endif
 
 }
-#endif
 
 // vim: set fileencoding=utf-8 foldmethod=marker :

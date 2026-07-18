@@ -40,6 +40,7 @@ sockets.  Connection targets can be specified in several ways.
 #include <iostream>
 #include <vector>
 #include <list>
+#include <format>
 #include <unistd.h>
 #include <set>
 #include <ctime>
@@ -83,166 +84,115 @@ namespace Webloop {
 // This happens through a template class that is used as the base class.
 // The socket is not a template and it can be transferred to another
 // application class object, even one of another type.
+
+Classes:
+- SocketBase: dynamically allocated; contains underlying logic.
+	Pointers for internals are to this object.
+- Socket <T>: base class for T; uses T as Cb target type.
+	Contains a pointer to SocketBase.
+	The SocketBase can be moved to a different object (of a different T).
 // }}} */
 
 class ServerBase;
-class SocketBase;
-
-class SocketSettingsBase { // {{{
-	friend class SocketBase;
-
-public:
-
-	// Callback types.
-	typedef void (SocketSettingsBase::*RawReadType)();
-	typedef void (SocketSettingsBase::*ReadType)(std::string &data);
-	typedef void (SocketSettingsBase::*ReadLinesType)
-		(std::string const &data);
-	typedef void (SocketSettingsBase::*DisconnectType)();
-	typedef void (SocketSettingsBase::*ErrorType)
-		(std::string const &message);
-
-protected:
-
-	SocketBase *parent;
-
-	// Pretend to use this class for callbacks.
-	// SocketSettings makes sure actual callbacks match target object.
-	SocketSettingsBase *target;
-
-	// Read callbacks.
-	RawReadType rawread_cb;
-	ReadType read_cb;
-	ReadLinesType read_lines_cb;
-	// Callback when socket is disconnected.
-	DisconnectType disconnect_cb;
-	// Error callback.
-	ErrorType error_cb;
-
-	SocketSettingsBase(SocketSettingsBase *target_obj,
-			DisconnectType disconnect, ErrorType error)
-	: target(target_obj), rawread_cb(nullptr), read_cb(nullptr),
-		read_lines_cb(nullptr), disconnect_cb(disconnect),
-		error_cb(error)
-	{
-		STARTFUNC;
-	}
-}; // }}}
-
-template <class UserType>
-class SocketSettings : public SocketSettingsBase { // {{{
-
-public:
-	typedef void (UserType::*RawReadCb)();
-	typedef void (UserType::*ReadCb)(std::string &buffer);
-	typedef void (UserType::*ReadLinesCb)(std::string const &buffer);
-	typedef void (UserType::*DisconnectCb)();
-	typedef void (UserType::*ErrorCb)(std::string const &message);
-
-	// Read event scheduling.
-	void set_rawread(RawReadCb callback)
-	{
-		STARTFUNC;
-		rawread_cb = reinterpret_cast <RawReadType> (callback);
-	}
-	void set_read(ReadCb callback)
-	{
-		STARTFUNC;
-		read_cb = reinterpret_cast <ReadType>(callback);
-	}
-	void set_read_lines(ReadLinesCb callback)
-	{
-		STARTFUNC;
-		read_lines_cb = reinterpret_cast <ReadLinesType> (callback);
-	}
-	// Other events.
-	void set_disconnect_cb(DisconnectCb callback)
-	{
-		STARTFUNC;
-		disconnect_cb = reinterpret_cast <DisconnectType>(callback);
-	}
-	void set_error_cb(ErrorCb callback)
-	{
-		STARTFUNC;
-		error_cb = reinterpret_cast <ErrorType>(callback);
-	}
-
-	SocketSettings(UserType *target,
-			RawReadCb rawread = nullptr, ReadCb read = nullptr,
-			ReadLinesCb read_lines = nullptr,
-			DisconnectCb disconnect = nullptr,
-			ErrorCb error = nullptr)
-		: SocketSettingsBase(target,
-				reinterpret_cast <RawReadType> (rawread),
-				reinterpret_cast <ReadType> (read),
-				reinterpret_cast <ReadLinesType> (read_lines),
-				reinterpret_cast <DisconnectType> (disconnect),
-				reinterpret_cast <ErrorType> (error))
-	{
-		STARTFUNC;
-	}
-}; // }}}
 
 class SocketBase { // {{{
 	friend class ServerBase;
+public:
+	class Base {};	// Fake class for cb target object.
+	typedef void (Base::*RawReadType)();
+	typedef void (Base::*ReadType)(std::string &buffer);
+	typedef void (Base::*ReadLinesType)(std::string const &line);
+	typedef void (Base::*WrittenType)();
+	typedef void (Base::*ConnectedType)();
+	typedef void (Base::*DisconnectedType)();
+	typedef void (Base::*ErrorType)(std::string const &message);
 private:
 
-	int fd;
-	size_t maxsize;	// For read operations.
-	Loop *current_loop;
-	Loop::IoHandle read_handle;
+	int m_in_fd;
+	int m_out_fd;
+	size_t m_maxsize;	// Per read operation.
+	Loop *m_current_loop;
+	Loop::IoHandle m_read_handle;	// For raw or normal read.
+
+	Base *m_target;
+	RawReadType m_raw_read_cb;
+	ReadType m_read_cb;
+	ReadLinesType m_read_lines_cb;
+	WrittenType m_written_cb;
+	ConnectedType m_connected_cb;
+	DisconnectedType m_disconnected_cb;
+	ErrorType m_error_cb;
 
 	// Pending received data.
-	std::string buffer;
+	std::string m_buffer;
 
 	// For server sockets: the Server that accepted them;
 	// for client sockets: nullptr.
-	std::shared_ptr <ServerBase> server;
+	std::shared_ptr <ServerBase> m_server;
 
 	// For server sockets: iterator into Server's socket list.
-	std::list <std::shared_ptr <SocketBase> >::iterator server_data;
+	std::list <std::shared_ptr <SocketBase> >::iterator m_server_data;
 
-	std::string name; // for debugging.
+	std::string m_name; // for debugging.
 
 	// Functions that are registered in the Loop.
 	typedef bool (SocketBase::*CbType)();
-	bool rawread_impl();
+	bool raw_read_impl();
 	bool read_impl();
 	bool read_lines_impl();
 
 	// Pass errors to user object and close the socket.
 	bool error_impl() {
-		buffer += unread();
-		if (my_settings.error_cb != nullptr) {
-			auto &target = my_settings.target;
-			auto &cb = my_settings.error_cb;
-			(target->*(cb))("error on socket");
-		}
+		m_buffer += unread();
+		if (m_error_cb != nullptr)
+			(m_target->*(m_error_cb))(m_buffer);
 		close();
 		return false;
 	}
 
 	bool handle_read_line_data(std::string &&data);
 
-protected:
-	SocketSettingsBase my_settings;
+public:
+	void set_target(Base *target)
+	{
+		if (m_target) {
+			if (m_disconnected_cb != nullptr)
+				(m_target->*m_disconnected_cb)();
+			unread();
+			unwritten();
+		}
+		WL_log(std::format("Setting target {}", (bool)target));
+		m_target = target;
+	}
 
-	std::string set_rawread(SocketSettingsBase::RawReadType callback);
-	std::string set_read(SocketSettingsBase::ReadType callback);
-	std::string set_read_lines(SocketSettingsBase::ReadLinesType callback);
+	std::string handle_raw_read(RawReadType callback);
+	void handle_read(ReadType callback, size_t maxsize = 0);
+	void handle_read_lines(ReadLinesType callback, size_t maxsize = 0);
+	void handle_written(WrittenType callback) { m_written_cb = callback; }
+	void handle_connected(ConnectedType callback)
+	{ m_connected_cb = callback; }
+	void handle_disconnected(DisconnectedType callback)
+	{ m_disconnected_cb = callback; }
+	void handle_error(ErrorType callback) { m_error_cb = callback; }
+	std::string unread();
+	void unwritten();
 
 	// For debugging.
-	int get_fd() const { return fd; }
-
-public:
+	int get_in_fd() const { return m_in_fd; }
+	int get_out_fd() const { return m_out_fd; }
 
 	// Read only address components; these are filled from address
-	// in the constructor.
-	URL url;
+	// in the constructor or open().
+	URL m_url;
 
-	// Constructor.
-	SocketBase(std::string const &name, int fd, URL const &url,
-			SocketSettingsBase *settings, Loop *loop);
+	// Constructors.
+	SocketBase(std::string const &name, Loop *loop = nullptr);
+	SocketBase(std::string const &name, URL const &url,
+			Loop *loop = nullptr);
+
+	// Open a connection.
+	void open(int in_fd, int out_fd);
+	void open(URL const &url);
 
 	// Close the connection.
 	std::string close();
@@ -250,62 +200,215 @@ public:
 	// Retrieve a string of data.
 	std::string recv();
 
-	// Write data.
-	// TODO: Sending data on a socket is currently blocking;
-	// TODO: it should instead be possible with callback.
 	void send(std::string const &data);
 
-	// Read event scheduling.
-	std::string unread();
-
 	// Check if socket is connected.
-	operator bool() const { return fd >= 0; }
+	operator bool() const { return m_in_fd >= 0; }
 
 	// Set and get name.
-	constexpr std::string const &get_name() const { return name; }
+	constexpr std::string const &get_name() const { return m_name; }
 	void set_name(std::string const &n)
 	{
-		name = n;
-		if (read_handle >= 0)
-			current_loop->update_name(read_handle, n);
+		m_name = n;
+		if (m_read_handle >= 0)
+			m_current_loop->update_name(m_read_handle, n);
 	}
 }; // }}}
 
-// Socket <UserType> {{{
-template <class UserType>
-class Socket : public SocketBase { // {{{
+template <class TargetType>
+class Socket { // {{{
 public:
+	template <class T> friend class Socket;
+	typedef void (TargetType::*RawReadType)();
+	typedef void (TargetType::*ReadType)(std::string &buffer);
+	typedef void (TargetType::*ReadLinesType)(std::string const &line);
+	typedef void (TargetType::*WrittenType)();
+	typedef void (TargetType::*ConnectedType)();
+	typedef void (TargetType::*DisconnectedType)();
+	typedef void (TargetType::*ErrorType)(std::string const &message);
 
-	// Create client socket, which connects to server.
-	Socket(std::string const &name, std::string const &address,
-			SocketSettings <UserType> const *settings = nullptr,
-			Loop *loop = nullptr);
-	// Use existing socket (or other fd). This is used by Server to handle
-	// accepted requests, and can be used to fake sockets.
-	Socket(std::string const &name, int fd = -1, 
-			SocketSettings <UserType> const *settings = nullptr,
-			Loop *loop = nullptr)
+private:
+	SocketBase *m_base;
+	RawReadType m_raw_read_cb;
+	ReadType m_read_cb;
+	ReadLinesType m_read_lines_cb;
+	WrittenType m_written_cb;
+	ConnectedType m_connected_cb;
+	DisconnectedType m_disconnected_cb;
+	ErrorType m_error_cb;
+
+	void sync_cbs();
+
+public:
+	// For sending.
+	class Iterator { // {{{
+	public:
+		using value_type = std::string;
+		using difference_type = std::ptrdiff_t;
+
+	private:
+		SocketBase *m_parent;
+		value_type m_value;
+
+	public:
+		Iterator(SocketBase *parent) : m_parent(parent), m_value{} {}
+
+		Iterator &operator++()
+		{
+			m_parent->send(m_value);
+			m_value.clear();
+			return *this;
+		}
+		Iterator operator++(int) { return ++*this; }
+		std::string &operator*() { return m_value; }
+	}; // }}}
+	Iterator send() { assert(m_base); return Iterator(m_base); }
+
+	template <class ...Args>
+	void send(std::string_view const &fmt, Args &&...args)
+	{ std::vformat_to(send(), fmt, std::make_format_args(args...)); }
+
+	Socket()
 		:
-			SocketBase(name, fd, URL(), settings, Loop::get(loop))
-			{ STARTFUNC; }
+			m_base(nullptr),
+			m_raw_read_cb(nullptr),
+			m_read_cb(nullptr),
+			m_read_lines_cb(nullptr),
+			m_written_cb(nullptr),
+			m_connected_cb(nullptr),
+			m_disconnected_cb(nullptr),
+			m_error_cb(nullptr)
+	{ STARTFUNC; }
 
-	SocketSettings <UserType> &settings()
-	{ return reinterpret_cast <SocketSettings <UserType> &> (my_settings); }
+	Socket(SocketBase *base)
+		:
+			m_base(base),
+			m_raw_read_cb(nullptr),
+			m_read_cb(nullptr),
+			m_read_lines_cb(nullptr),
+			m_written_cb(nullptr),
+			m_connected_cb(nullptr),
+			m_disconnected_cb(nullptr),
+			m_error_cb(nullptr)
+	{
+		STARTFUNC;
+		auto target = reinterpret_cast <SocketBase::Base *> (this);
+		m_base->set_target(target);
+		sync_cbs();
+	}
 
+	Socket(URL const &url, std::string const &name = "socketbase")
+		:
+			m_base(new SocketBase(name, url)),
+			m_raw_read_cb(nullptr),
+			m_read_cb(nullptr),
+			m_read_lines_cb(nullptr),
+			m_written_cb(nullptr),
+			m_connected_cb(nullptr),
+			m_disconnected_cb(nullptr),
+			m_error_cb(nullptr)
+		{ STARTFUNC; }
+
+	void open(URL const &url, std::string const &name = "socketbase")
+	{
+		STARTFUNC;
+		if (!m_base) {
+			m_base = new SocketBase(name, url);
+			m_base->set_target
+				(reinterpret_cast <SocketBase::Base *> (this));
+		} else {
+			m_base->open(url);
+		}
+		sync_cbs();
+	}
+
+	template <class T>
+	void transfer_to(Socket <T> &target)
+	{
+		STARTFUNC;
+		assert(m_base != nullptr);
+		auto other = reinterpret_cast <SocketBase::Base *> (&target);
+		m_base->set_target(other);
+		target.m_base = m_base;
+		m_base = nullptr;
+		target.sync_cbs();
+	}
+
+	std::string close()
+	{
+		if (!m_base)
+			return std::string();
+		auto ret = m_base->close();
+		delete m_base;
+		m_base = nullptr;
+		return ret;
+	}
+
+	~Socket() { close(); }
+
+	std::string handle_raw_read(RawReadType callback)
+	{
+		auto ret = unread();
+		m_raw_read_cb = callback;
+		sync_cbs();
+		return ret;
+	}
+	void handle_read(ReadType callback)
+	{ unread(); m_read_cb = callback; sync_cbs(); }
+	void handle_read_lines(ReadLinesType callback)
+	{ unread(); m_read_lines_cb = callback; sync_cbs(); }
+	void handle_written(WrittenType callback)
+	{ unwritten(); m_written_cb = callback; sync_cbs(); }
+	void handle_connected(ConnectedType callback)
+	{ m_connected_cb = callback; sync_cbs(); }
+	void handle_disconnected(DisconnectedType callback)
+	{ m_disconnected_cb = callback; sync_cbs(); }
+	void handle_error(ErrorType callback)
+	{ m_error_cb = callback; sync_cbs(); }
+	std::string unread()
+	{
+		std::string ret;
+		if (m_base)
+			ret = m_base->unread();
+		m_raw_read_cb = nullptr;
+		m_read_cb = nullptr;
+		m_read_lines_cb = nullptr;
+		return ret;
+	}
+	void unwritten()
+	{
+		if (m_base)
+			m_base->unwritten();
+		m_written_cb = nullptr;
+	}
 }; // }}}
 
-template <class UserType>
-Socket <UserType>::Socket(std::string const &name, std::string const &address,
-		SocketSettings <UserType> const *settings, Loop *loop) // {{{
-	:
-		SocketBase(name, -1, address,
-		reinterpret_cast <SocketSettingsBase *>(settings),
-		Loop::get(loop))
+template <class TargetType>
+void Socket <TargetType>::sync_cbs()
 {
-	STARTFUNC;
-} // }}}
-
-// }}}
+	if (!m_base)
+		return;
+	auto raw_read_cb =
+		reinterpret_cast <SocketBase::RawReadType> (m_raw_read_cb);
+	m_base->handle_raw_read(raw_read_cb);
+	auto read_cb = reinterpret_cast <SocketBase::ReadType> (m_read_cb);
+	m_base->handle_read(read_cb);
+	auto read_lines_cb =
+		reinterpret_cast <SocketBase::ReadLinesType> (m_read_lines_cb);
+	m_base->handle_read_lines(read_lines_cb);
+	auto written_cb =
+		reinterpret_cast <SocketBase::WrittenType> (m_written_cb);
+	m_base->handle_written(written_cb);
+	auto connected_cb =
+		reinterpret_cast <SocketBase::ConnectedType> (m_connected_cb);
+	m_base->handle_connected(connected_cb);
+	auto disconnected_cb = reinterpret_cast <SocketBase::DisconnectedType>
+		(m_disconnected_cb);
+	m_base->handle_disconnected(disconnected_cb);
+	auto error_cb =
+		reinterpret_cast <SocketBase::ErrorType> (m_error_cb);
+	m_base->handle_error(error_cb);
+}
 
 #if 0
 class ServerBase { // {{{
@@ -317,11 +420,11 @@ public:
 	typedef void (OwnerBase::*ErrorType)(std::string const &message);
 private:
 	struct Listener {	// Data for listening socket; used as user for poll events.
-		ServerBase *server;
-		int fd;
+		ServerBase *m_server;
+		int m_fd;
 		Socket <Listener> socket;
-		std::string name;
-		Listener(std::string const &name, ServerBase *server, int fd) : server(server), fd(fd), socket("server listener " + name, fd, this), name(name) {}
+		std::string m_name;
+		Listener(std::string const &name, ServerBase *server, int fd) : m_server(server), m_fd(fd), socket("server listener " + m_name, fd, this), m_name(name) {}
 		void accept_remote();
 	};
 	Loop *listenloop;
@@ -336,7 +439,7 @@ protected:
 	// Callbacks.
 	CreateType create_cb;
 	ClosedType closed_cb;
-	ErrorType error_cb;
+	ErrorType m_error_cb;
 
 public:
 	ServerBase(std::string const &service, OwnerBase *owner, CreateType create, ClosedType closed, ErrorType error, Loop *loop, int backlog);
@@ -389,7 +492,7 @@ public:
 	// Set callbacks.
 	void set_create_cb(CreateCb callback) { create_cb = reinterpret_cast <CreateType>(callback); }
 	void set_closed_cb(ClosedCb callback) { closed_cb = reinterpret_cast <ClosedType>(callback); }
-	void set_error_cb(ErrorCb callback) { error_cb = reinterpret_cast <ErrorType>(callback); }
+	void set_error_cb(ErrorCb callback) { m_error_cb = reinterpret_cast <ErrorType>(callback); }
 }; // }}}
 #endif
 
