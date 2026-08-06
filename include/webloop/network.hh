@@ -108,11 +108,17 @@ public:
 	typedef void (Base::*ErrorType)(std::string const &message);
 private:
 
+	// Initialized when first ssl socket is used.
+	static SSL_CTX *s_default_ssl_context;
+	SSL_CTX *m_ssl_context;
+
 	int m_in_fd;
 	int m_out_fd;
 	size_t m_maxsize;	// Per read operation.
+	SSL *m_ssl;	// nullptr for non-ssl socket.
 	Loop *m_current_loop;
 	Loop::IoHandle m_read_handle;	// For raw or normal read.
+	Loop::IoHandle m_write_handle;	// Only valid if !m_write_buffer.empty()
 
 	Base *m_target;
 	RawReadType m_raw_read_cb;
@@ -124,7 +130,10 @@ private:
 	ErrorType m_error_cb;
 
 	// Pending received data.
-	std::string m_buffer;
+	std::string m_read_buffer;
+
+	// Pending data to write.
+	std::string m_write_buffer;
 
 	// For server sockets: the Server that accepted them;
 	// for client sockets: nullptr.
@@ -143,9 +152,9 @@ private:
 
 	// Pass errors to user object and close the socket.
 	bool error_impl() {
-		m_buffer += unread();
+		m_read_buffer += unread();
 		if (m_error_cb != nullptr)
-			(m_target->*(m_error_cb))(m_buffer);
+			(m_target->*(m_error_cb))(m_read_buffer);
 		close();
 		return false;
 	}
@@ -211,7 +220,9 @@ public:
 	{
 		m_name = n;
 		if (m_read_handle >= 0)
-			m_current_loop->update_name(m_read_handle, n);
+			m_current_loop->update_name(m_read_handle, n + '(r)');
+		if (m_write_handle >= 0)
+			m_current_loop->update_name(m_write_handle, n + '(w)');
 	}
 }; // }}}
 
@@ -385,7 +396,7 @@ public:
 
 template <class TargetType>
 void Socket <TargetType>::sync_cbs()
-{
+{ // {{{
 	if (!m_base)
 		return;
 	auto raw_read_cb =
@@ -408,7 +419,7 @@ void Socket <TargetType>::sync_cbs()
 	auto error_cb =
 		reinterpret_cast <SocketBase::ErrorType> (m_error_cb);
 	m_base->handle_error(error_cb);
-}
+} // }}}
 
 #if 0
 class ServerBase { // {{{
