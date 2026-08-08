@@ -15,6 +15,8 @@ static int initial_debug() { // {{{
 	std::istringstream s(debug);
 	int ret;
 	s >> ret;
+	if (DEBUG > 4)
+		WL_log(std::format("Debug set to {}", DEBUG));
 	return ret;
 } // }}}
 

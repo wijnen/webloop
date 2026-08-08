@@ -50,6 +50,7 @@ sockets.  Connection targets can be specified in several ways.
 #include <sys/types.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <openssl/ssl.h>
 #include "tools.hh"
 #include "loop.hh"
 #include "url.hh"
@@ -105,7 +106,7 @@ public:
 	typedef void (Base::*WrittenType)();
 	typedef void (Base::*ConnectedType)();
 	typedef void (Base::*DisconnectedType)();
-	typedef void (Base::*ErrorType)(std::string const &message);
+	typedef void (Base::*ErrorType)();
 private:
 
 	// Initialized when first ssl socket is used.
@@ -116,6 +117,7 @@ private:
 	int m_out_fd;
 	size_t m_maxsize;	// Per read operation.
 	SSL *m_ssl;	// nullptr for non-ssl socket.
+	bool m_connecting;	// Used only for ssl.
 	Loop *m_current_loop;
 	Loop::IoHandle m_read_handle;	// For raw or normal read.
 	Loop::IoHandle m_write_handle;	// Only valid if !m_write_buffer.empty()
@@ -149,12 +151,18 @@ private:
 	bool raw_read_impl();
 	bool read_impl();
 	bool read_lines_impl();
+	bool write_impl();
+
+	SSL_CTX *make_ssl_context(SSL_CTX *ctx);
+	bool handle_ssl();
+	void suspend_for_ssl(int code);
+	void open_ssl(SSL_CTX *ssl_context);
 
 	// Pass errors to user object and close the socket.
 	bool error_impl() {
 		m_read_buffer += unread();
 		if (m_error_cb != nullptr)
-			(m_target->*(m_error_cb))(m_read_buffer);
+			(m_target->*(m_error_cb))();
 		close();
 		return false;
 	}
@@ -170,8 +178,17 @@ public:
 			unread();
 			unwritten();
 		}
-		WL_log(std::format("Setting target {}", (bool)target));
+		//WL_log(std::format("Setting target {}", (bool)target));
 		m_target = target;
+		if (!m_write_buffer.empty()) {
+			// Add write event to loop.
+			Loop::IoRecord write_item (m_name, this, m_out_fd,
+				POLLOUT, CbType(),
+				m_ssl == nullptr ? &SocketBase::write_impl :
+				&SocketBase::handle_ssl,
+				&SocketBase::error_impl);
+			m_write_handle = m_current_loop->add_io(write_item);
+		}
 	}
 
 	std::string handle_raw_read(RawReadType callback);
@@ -200,8 +217,10 @@ public:
 			Loop *loop = nullptr);
 
 	// Open a connection.
-	void open(int in_fd, int out_fd);
-	void open(URL const &url);
+	void open(int in_fd, int out_fd, bool ssl = false,
+			SSL_CTX *ssl_context = nullptr);
+	void open(URL const &url, bool ssl = true,
+			SSL_CTX *ssl_context = nullptr);
 
 	// Close the connection.
 	std::string close();
@@ -220,9 +239,9 @@ public:
 	{
 		m_name = n;
 		if (m_read_handle >= 0)
-			m_current_loop->update_name(m_read_handle, n + '(r)');
+			m_current_loop->update_name(m_read_handle, n + "(r)");
 		if (m_write_handle >= 0)
-			m_current_loop->update_name(m_write_handle, n + '(w)');
+			m_current_loop->update_name(m_write_handle, n + "(w)");
 	}
 }; // }}}
 
@@ -236,7 +255,7 @@ public:
 	typedef void (TargetType::*WrittenType)();
 	typedef void (TargetType::*ConnectedType)();
 	typedef void (TargetType::*DisconnectedType)();
-	typedef void (TargetType::*ErrorType)(std::string const &message);
+	typedef void (TargetType::*ErrorType)();
 
 private:
 	SocketBase *m_base;
@@ -266,18 +285,22 @@ public:
 
 		Iterator &operator++()
 		{
+			STARTFUNC;
 			m_parent->send(m_value);
 			m_value.clear();
 			return *this;
 		}
-		Iterator operator++(int) { return ++*this; }
-		std::string &operator*() { return m_value; }
+		Iterator operator++(int) { STARTFUNC; return ++*this; }
+		std::string &operator*() { STARTFUNC; return m_value; }
 	}; // }}}
-	Iterator send() { assert(m_base); return Iterator(m_base); }
+	Iterator send() { STARTFUNC; assert(m_base); return Iterator(m_base); }
 
 	template <class ...Args>
 	void send(std::string_view const &fmt, Args &&...args)
-	{ std::vformat_to(send(), fmt, std::make_format_args(args...)); }
+	{
+		STARTFUNC;
+		std::vformat_to(send(), fmt, std::make_format_args(args...));
+	}
 
 	Socket()
 		:

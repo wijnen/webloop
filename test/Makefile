@@ -24,7 +24,7 @@ HEADERS = ../include/webloop.hh $(addprefix ../include/webloop/,$(addsuffix .hh,
 CPPFLAGS = -Wall -Wextra -I../include
 CXXFLAGS = -std=c++26 -ggdb3
 LDFLAGS = -std=c++23 -Wl,-rpath=/home/shevek/src/webloop/.libs
-LIBADD = -L../.libs -lwebloop
+LIBADD = -L../.libs -lwebloop -lssl
 
 build/%.o: %.cc ${HEADERS} Makefile
 	mkdir -p build

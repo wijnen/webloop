@@ -6,5 +6,6 @@ includedir=@includedir@
 Name: webloop
 Description: fhs, network, websocket and mainloop system
 Version: @VERSION@
+Requires: libssl
 Libs: -L${libdir} -lwebloop
 Cflags: -std=c++23 -I${includedir}

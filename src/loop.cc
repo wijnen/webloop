@@ -40,7 +40,7 @@ int Loop::PollItems::add(IoRecord const &item) { // {{{
 		items.push_back(item);
 	}
 	if (DEBUG > 3)
-		WL_log("adding loop item @" + std::to_string(uint64_t((void *)item.object)) + ": " + std::to_string(ret));
+		WL_log(std::format("adding loop item {}@{} fd={} events={}", ret, uint64_t((void *)item.object), data[ret].fd, data[ret].events));
 	return ret;
 } // }}}
 

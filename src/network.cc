@@ -53,7 +53,7 @@ namespace Webloop {
 // - Socket: used for connection; symmetric
 // }}} */
 
-SSL_CTX *SocketBase::s_ssl_context = nullptr;
+SSL_CTX *SocketBase::s_default_ssl_context = nullptr;
 
 // Network sockets. {{{
 // Read internals. {{{
@@ -61,7 +61,8 @@ bool SocketBase::raw_read_impl()
 { // {{{
 	STARTFUNC;
 	if (m_raw_read_cb == nullptr || m_target == nullptr) {
-		WL_log(std::format("raw cb: {}; target: {}", (bool)m_raw_read_cb, (bool)m_target));
+		//WL_log(std::format("raw cb: {}; target: {}",
+		//	(bool)m_raw_read_cb, (bool)m_target));
 		return false;
 	}
 	(m_target->*m_raw_read_cb)();
@@ -129,28 +130,21 @@ std::string SocketBase::recv()
 	@return The received data as a bytes object.
 	*/
 	if (m_in_fd < 0) {
-		WL_log("recv on closed socket");
+		//WL_log("recv on closed socket");
 		throw "recv on closed socket";
 	}
-	WL_log(std::format("recv on fd {}, size {}", m_in_fd, m_maxsize));
+	//WL_log(std::format("recv on fd {}, size {}", m_in_fd, m_maxsize));
 	char *buffer = new char[m_maxsize];
 	int num;
-	if (m_ssl == nullptr) {
-		num = ::read(m_in_fd, buffer, m_maxsize);
-	} else {
-		num = SSL_read(m_ssl, buffer, m_maxsize);
-		if (num == SSL_ERROR_WANT_READ) {
-			return std::string();
-		} else if (num == SSL_ERROR_WANT_WRITE) {
-			// TODO: select for writing to socket,
-			// then call this again.
-			return std::string();
-		}
-	}
+	assert(m_ssl == nullptr);
+	num = ::read(m_in_fd, buffer, m_maxsize);
 	if (num < 0) {
 		if (errno == EWOULDBLOCK || errno == EAGAIN)
 			return std::string();
-		WL_log(std::string("Error reading from socket: ") + strerror(errno));
+		if (DEBUG > 0) {
+			WL_log(std::format("Error reading from socket: {}",
+						strerror(errno)));
+		}
 		delete[] buffer;
 		return close();
 	}
@@ -174,8 +168,11 @@ std::string SocketBase::recv()
 // Constructors. {{{
 SocketBase::SocketBase(std::string const &name, Loop *loop)
 	:
+		m_ssl_context(nullptr),
 		m_in_fd(-1), m_out_fd(-1),
 		m_maxsize(4096),
+		m_ssl(nullptr),
+		m_connecting(false),
 		m_current_loop(Loop::get(loop)),
 		m_read_handle(m_current_loop->invalid_io()),
 		m_write_handle(m_current_loop->invalid_io()),
@@ -230,16 +227,52 @@ SocketBase::SocketBase(std::string const &name, URL const &address, Loop *loop)
 }
 // }}}
 
-void SocketBase::open(int in_fd, int out_fd)
+SSL_CTX *SocketBase::make_ssl_context(SSL_CTX *ctx)
+{ // {{{
+	if (ctx != nullptr)
+		return ctx;
+
+	if (s_default_ssl_context == nullptr)
+		s_default_ssl_context = SSL_CTX_new(TLS_method());
+
+	return s_default_ssl_context;
+} // }}}
+
+void SocketBase::open_ssl(SSL_CTX *ssl_context)
+{ // {{{
+	assert(m_in_fd == m_out_fd);
+	m_ssl_context = make_ssl_context(ssl_context);
+	m_ssl = SSL_new(m_ssl_context);
+	if (!m_ssl)
+		throw "Unable to create ssl socket";
+	SSL_set_blocking_mode(m_ssl, false);
+	SSL_set_fd(m_ssl, m_in_fd);
+	int ret = SSL_connect(m_ssl);
+	if (ret >= 0) {
+		m_connecting = false;
+		if (m_connected_cb != nullptr) {
+			assert(m_target != nullptr);
+			(m_target->*m_connected_cb)();
+		}
+	} else {
+		m_connecting = true;
+		suspend_for_ssl(ret);
+	}
+} // }}}
+
+void SocketBase::open(int in_fd, int out_fd, bool ssl, SSL_CTX *ssl_context)
 { // {{{
 	close();
 	m_in_fd = in_fd;
 	m_out_fd = out_fd;
+	if (ssl)
+		open_ssl(ssl_context);
 } // }}}
 
-void SocketBase::open(URL const &address)
+void SocketBase::open(URL const &address, bool ssl, SSL_CTX *ssl_context)
 { // {{{
-	WL_log("connecting to " + m_url.print());
+	if (DEBUG > 4)
+		WL_log("connecting to " + m_url.print());
 
 	m_url = address;
 	if (m_url.unix.empty() && m_url.service.empty()) {
@@ -285,11 +318,24 @@ void SocketBase::open(URL const &address)
 				continue;
 			}
 			if (connect(m_in_fd, rp->ai_addr, rp->ai_addrlen) < 0) {
-				std::cerr << "Fail: " << m_url.src << std::endl;
-				if (!rp->ai_next || errno != ECONNREFUSED) {
-					std::cerr <<
-						"Unable to connect socket: " <<
-						strerror(errno) << std::endl;
+				if (DEBUG > 1 || !rp->ai_next ||
+						errno != ECONNREFUSED) {
+					std::cerr << std::format(
+							"Unable to connect "
+							"to socket: "
+							"fd: {}, "
+							"len: {}, "
+							"fam: {}, "
+							"type: {}, "
+							"proto: {}: "
+							"{}",
+							m_in_fd,
+							rp->ai_addrlen,
+							rp->ai_family,
+							rp->ai_socktype,
+							rp->ai_protocol,
+							strerror(errno)) <<
+						std::endl;
 				}
 				::close(m_in_fd);
 				m_in_fd = -1;
@@ -311,9 +357,14 @@ void SocketBase::open(URL const &address)
 			strerror(errno) << std::endl;
 		throw "unable to set socket to nonblocking";
 	}
-	if (m_connected_cb != nullptr) {
-		assert(m_target != nullptr);
-		(m_target->*m_connected_cb)();
+
+	if (ssl) {
+		open_ssl(ssl_context);
+	} else {
+		if (m_connected_cb != nullptr) {
+			assert(m_target != nullptr);
+			(m_target->*m_connected_cb)();
+		}
 	}
 } // }}}
 
@@ -362,7 +413,8 @@ std::string SocketBase::handle_raw_read(RawReadType callback)
 	if (m_in_fd < 0)
 		return std::string();
 	std::string ret = unread();
-	WL_log("raw read");
+	if (DEBUG > 4)
+		WL_log("raw read");
 	m_raw_read_cb = callback;
 	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
 		&SocketBase::raw_read_impl, CbType(), &SocketBase::error_impl};
@@ -391,15 +443,16 @@ void SocketBase::handle_read(ReadType callback, size_t maxsize)
 	if (m_in_fd < 0)
 		return;
 	std::string first = unread();
-	WL_log("read");
 	if (maxsize > 0)
 		m_maxsize = maxsize;
 	m_read_cb = callback;
 	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
 		&SocketBase::read_impl, CbType(), &SocketBase::error_impl};
 	m_read_handle = m_current_loop->add_io(read_item);
-	if (!first.empty())
-		(m_target->*m_read_cb)(first);
+	if (!first.empty()) {
+		m_read_buffer = std::move(first);
+		(m_target->*m_read_cb)(m_read_buffer);
+	}
 } // }}}
 
 void SocketBase::handle_read_lines(ReadLinesType callback, size_t maxsize)
@@ -422,7 +475,8 @@ void SocketBase::handle_read_lines(ReadLinesType callback, size_t maxsize)
 	if (m_in_fd < 0)
 		return;
 	std::string first = unread();
-	WL_log("read lines");
+	if (DEBUG > 4)
+		WL_log("read lines");
 	if (maxsize > 0)
 		m_maxsize = maxsize;
 	m_read_lines_cb = callback;
@@ -444,14 +498,16 @@ std::string SocketBase::unread()
 	*/
 	//WL_log("unreading");
 	if (m_read_handle != m_current_loop->invalid_io()) {
-		WL_log("unreading active");
+		if (DEBUG > 4)
+			WL_log("unreading active");
 		m_current_loop->remove_io(m_read_handle);
 		m_read_handle = m_current_loop->invalid_io();
 		m_raw_read_cb = nullptr;
 		m_read_cb = nullptr;
 		m_read_lines_cb = nullptr;
 	} else {
-		WL_log("not unreading");
+		if (DEBUG > 4)
+			WL_log("not unreading");
 	}
 	std::string ret = std::move(m_read_buffer);
 	m_read_buffer.clear();
@@ -464,17 +520,18 @@ void SocketBase::send(std::string const &data)
 { // {{{
 	STARTFUNC;
 	/* Send data over the network.
-	Send data over the network.  Block until all data is in the buffer.
-	// TODO: Do not block.
-	@param data: data to write.  This should be of type bytes.
+	@param data: data to write.
 	@return None.
 	*/
-	if (m_out_fd < 0)
+	if (m_out_fd < 0) {
+		if (DEBUG > 3)
+			WL_log("Dropping data, because out_fd is invalid");
 		return;
+	}
 	if (DEBUG > 3)
 		WL_log("Sending: " + WebString(data).dump());
 	m_write_buffer += data;
-	if (m_write_handle != m_current_loop->invalid_io()) {
+	if (m_write_handle == m_current_loop->invalid_io()) {
 		Loop::IoRecord write_item {m_name, this, m_out_fd, POLLOUT,
 			&SocketBase::write_impl, CbType(),
 			&SocketBase::error_impl};
@@ -482,65 +539,118 @@ void SocketBase::send(std::string const &data)
 	}
 } // }}}
 
-void SocketBase::write_impl()
+bool SocketBase::write_impl()
 { // {{{
-	if (m_out_fd < 0)
-		return;
-	if (data.empty()) {
-		// Data was unwritten. Do not call cb.
-		return;
+	STARTFUNC;
+	if (m_out_fd < 0) {
+		if (DEBUG > 3)
+			WL_log("Dropping data, because out_fd is invalid");
+		return false;
 	}
-	int n = write(m_out_fd, data.data(), data.size());
+	if (m_write_buffer.empty()) {
+		// Data was unwritten. Do not call cb.
+		return false;
+	}
+	int size = m_write_buffer.size();
+	int n = write(m_out_fd, m_write_buffer.data(), size);
 	if (n < 0) {
 		// Error.
+		if (DEBUG > 4)
+			WL_log("Write error");
 		if (m_error_cb != nullptr)
 			(m_target->*m_error_cb)();
 		else
 			close();
-		return;
+		return false;
 	}
-	data = data.substr(n);
+	if (n == size) {
+		if (DEBUG > 4)
+			WL_log("Write done");
+		m_write_buffer.clear();
+		return false;
+	}
+	if (DEBUG > 4)
+		WL_log("More to write");
+	m_write_buffer = m_write_buffer.substr(n);
+	return true;
 } // }}}
 
-void SocketBase::handle_ssl()
+void SocketBase::suspend_for_ssl(int code)
+{
+	if (code == SSL_ERROR_WANT_READ) {
+		// Call this again when data can be read.
+		Loop::IoRecord item (m_name, this, m_in_fd,
+				POLLIN | POLLPRI, &SocketBase::handle_ssl,
+				CbType(), &SocketBase::error_impl);
+		m_read_handle = m_current_loop->add_io(item);
+	} else if (code == SSL_ERROR_WANT_WRITE) {
+		// call this again when data can be written.
+		Loop::IoRecord item (m_name, this, m_out_fd,
+				POLLOUT, CbType(), &SocketBase::handle_ssl,
+				&SocketBase::error_impl);
+		m_read_handle = m_current_loop->add_io(item);
+	} else if (code < 0) {
+		if (DEBUG > 0)
+			WL_log("SSL error");
+		throw "SSL error";
+	}
+}
+
+bool SocketBase::handle_ssl()
 { // {{{
 	int n;
-	if (!m_write_buffer.empty()) {
+	if (m_connecting) {
+		// Work on handshake.
+		n = SSL_connect(m_ssl);
+		if (DEBUG > 4)
+			WL_log("Connect resume attempt");
+		if (n >= 0) {
+			m_connecting = false;
+			if (m_connected_cb != nullptr) {
+				assert(m_target != nullptr);
+				(m_target->*m_connected_cb)();
+			}
+		}
+	} else if (!m_write_buffer.empty()) {
 		// Write.
-		n = SSL_write(m_out_fd, m_write_buffer.data(),
+		n = SSL_write(m_ssl, m_write_buffer.data(),
 				m_write_buffer.size());
 		if (DEBUG > 4)
 			WL_log("written " + std::to_string(n) + " bytes");
 		if (n > 0) {
+			if ((size_t)n == m_write_buffer.size()) {
+				m_write_buffer.clear();
+				(m_target->*m_written_cb)();
+			}
 			m_write_buffer = m_write_buffer.substr(n);
-			return;
 		}
 	} else {
 		// Read.
+		char buffer[m_maxsize];
 		n = SSL_read(m_ssl, buffer, m_maxsize);
+		if (n > 0) {
+			if (m_read_cb != nullptr) {
+				if (m_read_buffer.empty())
+					m_read_buffer = std::string(buffer, n);
+				else
+					m_read_buffer += std::string(buffer, n);
+				(m_target->*m_read_cb)(m_read_buffer);
+			} else if (m_read_lines_cb != nullptr) {
+				handle_read_line_data(std::string(buffer, n));
+			} else {
+				// Read was cancelled. Ignore result.
+			}
+		}
 	}
-	if (n == SSL_ERROR_WANT_READ) {
-		// TODO: call this again when data can be read.
-		continue;
-	} else if (n == SSL_ERROR_WANT_WRITE) {
-		// TODO: call this again when data can be written.
-		continue;
-	}
+	// ssl always uses m_read_handle.
+	m_current_loop->remove_io(m_read_handle);
+	suspend_for_ssl(n);
+	return false;
 } // }}}
-if (n <= 0) {
-	std::cerr << "failed to write data to socket";
-	close();
-	return;
-}
-p += n;
-}
-if (m_written_cb) {
-assert(m_target);
-(m_target->*m_written_cb)();
-}
 
 void SocketBase::unwritten()
 { // {{{
+	STARTFUNC;
 	// TODO: implement non-blocking write.
 	m_written_cb = nullptr;
 } // }}}

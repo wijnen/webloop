@@ -5,7 +5,13 @@
 
 /*
 OUTPUT:
-int: 0.
+Raw read ready.
+Read line: a
+Socket disconnected.
+Reading 2
+Read2 done: b
+
+Disconnected.
 END OF OUTPUT.
 */
 
@@ -43,7 +49,7 @@ void Socket::connected()
 void Socket::raw_read()
 {
 	printf("Raw read ready.\n");
-	handle_read_lines (&Socket::read_line);
+	handle_read_lines(&Socket::read_line);
 	send("Writing {}.\n", 9944);
 }
 
@@ -61,7 +67,7 @@ void Socket::read_line(std::string const &line)
 
 void Socket::disconnected()
 {
-	printf("Socket disconnected. THIS SHOULD NOT HAPPEN!\n");
+	printf("Socket disconnected.\n");
 }
 
 void Socket2::connected()
@@ -84,7 +90,7 @@ void Socket2::disconnected()
 
 int main(int /*argc*/, char ** /*argv*/)
 {
-	// TODO: bind cbs to Socket; copy to SocketBase on transfer or open.
+	// Bind cbs to Socket; copy to SocketBase on transfer or open.
 	loop = Webloop::Loop::get();
 	Socket socket;
 	socket.handle_connected(&Socket::connected);
