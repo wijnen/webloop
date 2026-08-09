@@ -127,29 +127,43 @@ void Loop::iteration(bool block) { // {{{
 	int t = handle_timeouts();
 	if (!block)
 		t = 0;
+	if (t < 0 && items.num == 0) {
+		// This would poll forever; that's a bug.
+		throw "Infinite loop";
+	}
 	poll(items.data, items.num, t);
 	for (int i = 0; !aborting && i < items.num; ++i) {
-		if (items.data[i].fd < 0)
+		if (items.data[current_item].fd < 0)
 			continue;
 		short ev = items.data[i].revents;
 		if (ev == 0)
 			continue;
+		current_item = i;
 		if (ev & (POLLERR | POLLNVAL)) {
-			if (!items.items[i].error || !(items.items[i].object->*(items.items[i].error))())
-				items.remove(i);
-		}
-		else {
+			if (!items.items[i].error || !(items.items[i].object->*
+						(items.items[i].error))()) {
+				if (i == current_item)
+					items.remove(i);
+				continue;
+			}
+		} else {
 			if (ev & (POLLIN | POLLPRI)) {
-				if (!items.items[i].read || !(items.items[i].object->*(items.items[i].read))()) {
-					if (items.data[i].fd >= 0)
+				if (!items.items[i].read || !(items.items[i].
+							object->*(items.items
+								[i].read))()) {
+					if (i == current_item)
 						items.remove(i);
 					continue;
 				}
 			}
 			if (ev & POLLOUT) {
-				if (!items.items[i].write || !(items.items[i].object->*(items.items[i].write))())
-					if (items.data[i].fd >= 0)
+				if (!items.items[i].write || !(items.items[i].
+							object->*(items.items
+								[i].write))()) {
+					if (i == current_item)
 						items.remove(i);
+					continue;
+				}
 			}
 		}
 	}
@@ -170,15 +184,17 @@ void Loop::run() { // {{{
 		if (!running)
 			continue;
 		// Run all the idle tasks.
-		std::list <IdleRecord>::iterator i = idle.begin();
-		while (i != idle.end()) {
-			next_idle_item = i;
-			++next_idle_item;
-			if (!(i->object->*(i->cb))())
-				remove_idle(i);
+		current_idle = idle.begin();
+		while (current_idle != idle.end()) {
+			std::list <IdleRecord>::iterator i = current_idle;
+			if (!(i->object->*(i->cb))()) {
+				if (i == current_idle)
+					remove_idle(i);
+			}
 			if (!running)
 				break;
-			i = next_idle_item;
+			if (i == current_idle)
+				++current_idle;
 		}
 	}
 	running = false;
@@ -197,8 +213,8 @@ void Loop::stop(bool force) { // {{{
 } // }}}
 
 void Loop::remove_idle(IdleHandle handle) { // {{{
-	if (handle == next_idle_item)
-		++next_idle_item;
+	if (handle == current_idle)
+		++current_idle;
 	idle.erase(handle);
 } // }}}
 

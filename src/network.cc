@@ -540,7 +540,7 @@ void SocketBase::send(std::string const &data)
 	m_write_buffer += data;
 	if (m_write_handle == m_current_loop->invalid_io()) {
 		Loop::IoRecord write_item {m_name, this, m_out_fd, POLLOUT,
-			&SocketBase::write_impl, CbType(),
+			CbType(), &SocketBase::write_impl,
 			&SocketBase::error_impl};
 		m_write_handle = m_current_loop->add_io(write_item);
 	}
@@ -582,6 +582,15 @@ bool SocketBase::write_impl()
 	return true;
 } // }}}
 
+void SocketBase::unwritten()
+{ // {{{
+	STARTFUNC;
+	// TODO: implement non-blocking write.
+	m_written_cb = nullptr;
+} // }}}
+// }}}
+
+// SSL. {{{
 void SocketBase::suspend_for_ssl(int ret)
 { // {{{
 	STARTFUNC;
@@ -604,6 +613,9 @@ void SocketBase::suspend_for_ssl(int ret)
 						ERR_error_string(code,
 							nullptr)));
 		throw "SSL error";
+	} else {
+		// Everything is fine; wait for read and/or write if requested.
+		// TODO.
 	}
 } // }}}
 
@@ -655,18 +667,14 @@ bool SocketBase::handle_ssl()
 		}
 	}
 	// ssl always uses m_read_handle.
+	WL_log("remove self");
 	m_current_loop->remove_io(m_read_handle);
 	suspend_for_ssl(n);
+	WL_log("done");
 	return false;
 } // }}}
-
-void SocketBase::unwritten()
-{ // {{{
-	STARTFUNC;
-	// TODO: implement non-blocking write.
-	m_written_cb = nullptr;
-} // }}}
 // }}}
+
 // }}}
 
 #if 0

@@ -111,8 +111,10 @@ private:
 	bool running;
 	bool aborting;
 	std::list <IdleRecord> idle;
-	std::list <IdleRecord>::iterator next_idle_item;
 	PollItems items;
+	IoHandle current_item;
+	TimeoutHandle current_timeout;
+	IdleHandle current_idle;
 	std::set <TimeoutRecord> timeouts;
 
 public:
@@ -120,7 +122,8 @@ public:
 
 	Loop() :
 		running(false), aborting(false), idle{},
-		next_idle_item(idle.end())
+		current_item(-1), current_timeout(timeouts.end()),
+		current_idle(idle.end())
 	{
 		if (!default_loop)
 			default_loop = this;
@@ -141,8 +144,18 @@ public:
 	IdleHandle add_idle(IdleRecord const &record)
 	{ idle.push_back(record); return --idle.end(); }
 
-	void remove_io(IoHandle handle) { items.remove(handle); }
-	void remove_timeout(TimeoutHandle handle) { timeouts.erase(handle); }
+	void remove_io(IoHandle handle)
+	{
+		if (handle == current_item)
+			current_item = -1;
+		items.remove(handle);
+	}
+	void remove_timeout(TimeoutHandle handle)
+	{
+		if (handle == current_timeout)
+			current_timeout = timeouts.end();
+		timeouts.erase(handle);
+	}
 	void remove_idle(IdleHandle handle);
 
 	IoHandle invalid_io() const { return -1; }
