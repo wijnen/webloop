@@ -213,7 +213,7 @@ public:
 
 	// Constructors.
 	SocketBase(std::string const &name, Loop *loop = nullptr);
-	SocketBase(std::string const &name, URL const &url,
+	SocketBase(std::string const &name, URL const &url, bool ssl = true,
 			Loop *loop = nullptr);
 
 	// Open a connection.
@@ -343,15 +343,17 @@ public:
 			m_error_cb(nullptr)
 		{ STARTFUNC; }
 
-	void open(URL const &url, std::string const &name = "socketbase")
+	void open(URL const &url, bool ssl = true,
+			std::string const &name = "socket")
 	{
 		STARTFUNC;
+		// TODO: Pass ssl context.
 		if (!m_base) {
-			m_base = new SocketBase(name, url);
+			m_base = new SocketBase(name, url, ssl);
 			m_base->set_target
 				(reinterpret_cast <SocketBase::Base *> (this));
 		} else {
-			m_base->open(url);
+			m_base->open(url, ssl);
 		}
 		sync_cbs();
 	}

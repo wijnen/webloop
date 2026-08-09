@@ -32,8 +32,9 @@ sockets.  Connection targets can be specified in several ways.
 */
 // }}}
 
-#include <cassert>
 #include <fcntl.h>
+#include <openssl/err.h>
+#include <cassert>
 #include "webloop/webobject.hh"
 #include "webloop/network.hh"
 
@@ -192,7 +193,8 @@ SocketBase::SocketBase(std::string const &name, Loop *loop)
 		m_url{}
 {}
 
-SocketBase::SocketBase(std::string const &name, URL const &address, Loop *loop)
+SocketBase::SocketBase(std::string const &name, URL const &address, bool ssl,
+		Loop *loop)
 	:
 		m_in_fd(-1), m_out_fd(-1),
 		m_maxsize(4096),
@@ -223,7 +225,8 @@ SocketBase::SocketBase(std::string const &name, URL const &address, Loop *loop)
 	prefixed with a hostname and a :.  If no hostname is present,
 	localhost is used.
 	*/
-	open(address);
+	// TODO: Pass ssl context.
+	open(address, ssl);
 }
 // }}}
 
@@ -410,6 +413,7 @@ std::string SocketBase::handle_raw_read(RawReadType callback)
 	*/
 	if (m_raw_read_cb == callback)
 		return std::string();
+	assert(m_ssl == nullptr);
 	if (m_in_fd < 0)
 		return std::string();
 	std::string ret = unread();
@@ -447,7 +451,9 @@ void SocketBase::handle_read(ReadType callback, size_t maxsize)
 		m_maxsize = maxsize;
 	m_read_cb = callback;
 	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
-		&SocketBase::read_impl, CbType(), &SocketBase::error_impl};
+		m_ssl == nullptr ? &SocketBase::read_impl :
+			&SocketBase::handle_ssl, CbType(),
+		&SocketBase::error_impl};
 	m_read_handle = m_current_loop->add_io(read_item);
 	if (!first.empty()) {
 		m_read_buffer = std::move(first);
@@ -481,7 +487,8 @@ void SocketBase::handle_read_lines(ReadLinesType callback, size_t maxsize)
 		m_maxsize = maxsize;
 	m_read_lines_cb = callback;
 	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
-		&SocketBase::read_lines_impl, CbType(),
+		m_ssl == nullptr ? &SocketBase::read_lines_impl :
+			&SocketBase::handle_ssl, CbType(),
 		&SocketBase::error_impl};
 	m_read_handle = m_current_loop->add_io(read_item);
 	if (!first.empty())
@@ -575,8 +582,10 @@ bool SocketBase::write_impl()
 	return true;
 } // }}}
 
-void SocketBase::suspend_for_ssl(int code)
-{
+void SocketBase::suspend_for_ssl(int ret)
+{ // {{{
+	STARTFUNC;
+	int code = SSL_get_error(m_ssl, ret);
 	if (code == SSL_ERROR_WANT_READ) {
 		// Call this again when data can be read.
 		Loop::IoRecord item (m_name, this, m_in_fd,
@@ -589,15 +598,18 @@ void SocketBase::suspend_for_ssl(int code)
 				POLLOUT, CbType(), &SocketBase::handle_ssl,
 				&SocketBase::error_impl);
 		m_read_handle = m_current_loop->add_io(item);
-	} else if (code < 0) {
+	} else if (code != SSL_ERROR_NONE) {
 		if (DEBUG > 0)
-			WL_log("SSL error");
+			WL_log(std::format("SSL error: {}",
+						ERR_error_string(code,
+							nullptr)));
 		throw "SSL error";
 	}
-}
+} // }}}
 
 bool SocketBase::handle_ssl()
 { // {{{
+	STARTFUNC;
 	int n;
 	if (m_connecting) {
 		// Work on handshake.

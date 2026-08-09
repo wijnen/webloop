@@ -90,16 +90,23 @@ void Socket2::disconnected()
 
 int main(int /*argc*/, char ** /*argv*/)
 {
-	// Bind cbs to Socket; copy to SocketBase on transfer or open.
-	loop = Webloop::Loop::get();
-	Socket socket;
-	socket.handle_connected(&Socket::connected);
-	socket.handle_disconnected(&Socket::disconnected);
-	socket2.handle_connected(&Socket2::connected);
-	socket2.handle_disconnected(&Socket2::disconnected);
-	socket2.handle_read(&Socket2::read);
-	socket.open(Webloop::URL("localhost:4433"));
-	socket.handle_raw_read(&Socket::raw_read);
-	loop->run();
-	return 0;
+	//try {
+		// Bind cbs to Socket; copy to SocketBase on transfer or open.
+		loop = Webloop::Loop::get();
+		Socket socket;
+		socket.handle_connected(&Socket::connected);
+		socket.handle_disconnected(&Socket::disconnected);
+		socket2.handle_connected(&Socket2::connected);
+		socket2.handle_disconnected(&Socket2::disconnected);
+		socket2.handle_read(&Socket2::read);
+		socket.open(Webloop::URL("https://wijnen.me:443"), true);
+		//socket.handle_raw_read(&Socket::raw_read);
+		socket.handle_read_lines(&Socket::read_line);
+		socket.send("Writing {}.\n", 9944);
+		loop->run();
+		return 0;
+	//} catch (char const *msg) {
+		//WL_log(std::format("Error: {}", msg));
+		//abort();
+	//}
 }
