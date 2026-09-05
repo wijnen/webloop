@@ -133,9 +133,13 @@ private:
 
 	// Pending received data.
 	std::string m_read_buffer;
+	// Temporary buffer for receiving data.
+	char *m_read_temp_buffer;
 
 	// Pending data to write.
 	std::string m_write_buffer;
+	// Marker for last unfinished write request, to repeat it.
+	int m_pending_write_size;
 
 	// For server sockets: the Server that accepted them;
 	// for client sockets: nullptr.
@@ -215,6 +219,11 @@ public:
 	SocketBase(std::string const &name, Loop *loop = nullptr);
 	SocketBase(std::string const &name, URL const &url, bool ssl = true,
 			Loop *loop = nullptr);
+	// Destructor.
+	~SocketBase() { delete[] m_read_temp_buffer; }
+
+	// Set temp buffer size.
+	void set_temp_buffer_size(size_t size);
 
 	// Open a connection.
 	void open(int in_fd, int out_fd, bool ssl = false,

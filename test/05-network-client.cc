@@ -44,6 +44,8 @@ static Socket2 socket2;
 void Socket::connected()
 {
 	printf("Connected.\n");
+	handle_read_lines(&Socket::read_line);
+	send("GET / HTTP/1.1\n\n");
 }
 
 void Socket::raw_read()
@@ -101,8 +103,6 @@ int main(int /*argc*/, char ** /*argv*/)
 		socket2.handle_read(&Socket2::read);
 		socket.open(Webloop::URL("https://wijnen.me:443"), true);
 		//socket.handle_raw_read(&Socket::raw_read);
-		socket.handle_read_lines(&Socket::read_line);
-		socket.send("Writing {}.\n", 9944);
 		loop->run();
 		return 0;
 	//} catch (char const *msg) {
