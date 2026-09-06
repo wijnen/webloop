@@ -463,28 +463,24 @@ void SocketBase::handle_read(ReadType callback, size_t maxsize)
 		WL_log("fd:" + std::to_string(m_in_fd));
 	if (m_read_cb == callback)
 		return;
-	if (m_in_fd < 0)
-		return;
 	std::string first = unread();
 	bool have_data = !first.empty();
 	if (maxsize > 0)
 		m_maxsize = maxsize;
 	m_read_cb = callback;
+	if (have_data) {
+		m_read_buffer = std::move(first);
+		(m_target->*m_read_cb)(m_read_buffer);
+	}
+	if (m_in_fd < 0)
+		return;
 	if (m_ssl != nullptr) {
-		if (have_data)
-			m_read_buffer = std::move(first);
 		handle_ssl();
-		if (have_data)
-			(m_target->*m_read_cb)(m_read_buffer);
 		return;
 	}
 	Loop::IoRecord read_item {m_name, this, m_in_fd, POLLIN | POLLPRI,
 		&SocketBase::read_impl, CbType(), &SocketBase::error_impl};
 	m_read_handle = m_current_loop->add_io(read_item);
-	if (have_data) {
-		m_read_buffer = std::move(first);
-		(m_target->*m_read_cb)(m_read_buffer);
-	}
 } // }}}
 
 void SocketBase::handle_read_lines(ReadLinesType callback, size_t maxsize)

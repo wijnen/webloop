@@ -45,7 +45,7 @@ void Socket::connected()
 {
 	printf("Connected.\n");
 	handle_read_lines(&Socket::read_line);
-	send("GET / HTTP/1.1\r\n\r\n");
+	send("GET / HTTP/1.1\nHost: wijnen.me\n\n");
 }
 
 /*
