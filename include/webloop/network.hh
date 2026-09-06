@@ -131,6 +131,11 @@ private:
 	DisconnectedType m_disconnected_cb;
 	ErrorType m_error_cb;
 
+	// If true, m_written_cb is not called.
+	bool m_sending;
+	// If true, m_written_cb is called when m_sending is reset.
+	bool m_pending_written;
+
 	// Pending received data.
 	std::string m_read_buffer;
 	// Temporary buffer for receiving data.
@@ -184,7 +189,7 @@ public:
 		}
 		//WL_log(std::format("Setting target {}", (bool)target));
 		m_target = target;
-		if (!m_write_buffer.empty()) {
+		if (m_ssl == nullptr && !m_write_buffer.empty()) {
 			// Add write event to loop.
 			Loop::IoRecord write_item (m_name, this, m_out_fd,
 				POLLOUT, CbType(),
@@ -236,8 +241,22 @@ public:
 
 	// Retrieve a string of data.
 	std::string recv();
+	// Handle remote disconnecting.
+	std::string received_disconnect();
 
 	void send(std::string const &data);
+	void sending(bool is_sending) {
+		if (m_sending == is_sending)
+			return;
+		m_sending = is_sending;
+		if (!is_sending) {
+			bool call_cb = m_pending_written;
+			m_pending_written = false;
+			if (call_cb && m_written_cb != nullptr &&
+					m_write_buffer.empty())
+				(m_target->*m_written_cb)();
+		}
+	}
 
 	// Check if socket is connected.
 	operator bool() const { return m_in_fd >= 0; }
@@ -308,7 +327,9 @@ public:
 	void send(std::string_view const &fmt, Args &&...args)
 	{
 		STARTFUNC;
+		m_base->sending(true);
 		std::vformat_to(send(), fmt, std::make_format_args(args...));
+		m_base->sending(false);
 	}
 
 	Socket()

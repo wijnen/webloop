@@ -45,15 +45,17 @@ void Socket::connected()
 {
 	printf("Connected.\n");
 	handle_read_lines(&Socket::read_line);
-	send("GET / HTTP/1.1\n\n");
+	send("GET / HTTP/1.1\r\n\r\n");
 }
 
+/*
 void Socket::raw_read()
 {
 	printf("Raw read ready.\n");
 	handle_read_lines(&Socket::read_line);
 	send("Writing {}.\n", 9944);
 }
+*/
 
 void Socket::write_done()
 {
@@ -64,12 +66,12 @@ void Socket::read_line(std::string const &line)
 {
 	printf("Read line: %s\n", line.c_str());
 	transfer_to(socket2);
-	printf("Reading 2\n");
 }
 
 void Socket::disconnected()
 {
 	printf("Socket disconnected.\n");
+	//loop->stop();
 }
 
 void Socket2::connected()
@@ -96,6 +98,7 @@ int main(int /*argc*/, char ** /*argv*/)
 		// Bind cbs to Socket; copy to SocketBase on transfer or open.
 		loop = Webloop::Loop::get();
 		Socket socket;
+		socket.handle_written(&Socket::write_done);
 		socket.handle_connected(&Socket::connected);
 		socket.handle_disconnected(&Socket::disconnected);
 		socket2.handle_connected(&Socket2::connected);

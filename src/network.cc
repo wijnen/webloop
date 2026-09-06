@@ -116,6 +116,17 @@ bool SocketBase::read_lines_impl()
 	return handle_read_line_data(recv());
 } // }}}
 
+std::string SocketBase::received_disconnect()
+{ // {{{
+	bool have_server = m_server.get() != nullptr;
+	std::string ret = close();
+	if (DEBUG > 3)
+		WL_log("closed");
+	if (!m_disconnected_cb && !have_server)
+		throw "network connection closed";
+	return ret;
+} // }}}
+
 std::string SocketBase::recv()
 { // {{{
 	STARTFUNC;
@@ -148,15 +159,9 @@ std::string SocketBase::recv()
 		}
 		return close();
 	}
-	if (num == 0) {
-		bool have_server = m_server.get() != nullptr;
-		std::string ret = close();
-		if (DEBUG > 3)
-			WL_log("closed");
-		if (!m_disconnected_cb && !have_server)
-			throw "network connection closed";
-		return ret;
-	}
+	if (num == 0)
+		return received_disconnect();
+
 	std::string ret(m_read_temp_buffer, num);
 	return ret;
 } // }}}
@@ -182,6 +187,8 @@ SocketBase::SocketBase(std::string const &name, Loop *loop)
 		m_connected_cb(nullptr),
 		m_disconnected_cb(nullptr),
 		m_error_cb(nullptr),
+		m_sending(false),
+		m_pending_written(false),
 		m_read_buffer{},
 		m_read_temp_buffer(new char[m_maxsize]),
 		m_write_buffer{},
@@ -208,6 +215,8 @@ SocketBase::SocketBase(std::string const &name, URL const &address, bool ssl,
 		m_connected_cb(nullptr),
 		m_disconnected_cb(nullptr),
 		m_error_cb(nullptr),
+		m_sending(false),
+		m_pending_written(false),
 		m_read_buffer(),
 		m_read_temp_buffer(new char[m_maxsize]),
 		m_write_buffer{},
@@ -285,7 +294,7 @@ void SocketBase::open(int in_fd, int out_fd, bool ssl, SSL_CTX *ssl_context)
 void SocketBase::open(URL const &address, bool ssl, SSL_CTX *ssl_context)
 { // {{{
 	if (DEBUG > 4)
-		WL_log("connecting to " + m_url.print());
+		WL_log("connecting to " + address.print());
 
 	m_url = address;
 	if (m_url.unix.empty() && m_url.service.empty()) {
@@ -601,6 +610,10 @@ bool SocketBase::write_impl()
 		if (DEBUG > 4)
 			WL_log("Write done");
 		m_write_buffer.clear();
+		if (m_sending)
+			m_pending_written = true;
+		else if (m_written_cb != nullptr)
+			(m_target->*m_written_cb)();
 		return false;
 	}
 	if (DEBUG > 4)
@@ -612,7 +625,6 @@ bool SocketBase::write_impl()
 void SocketBase::unwritten()
 { // {{{
 	STARTFUNC;
-	// TODO: implement non-blocking write.
 	m_written_cb = nullptr;
 } // }}}
 // }}}
@@ -631,6 +643,10 @@ void SocketBase::suspend_for_ssl(int ret)
 				&SocketBase::error_impl);
 		m_read_handle = m_current_loop->add_io(item);
 	} else if (code != SSL_ERROR_WANT_READ && code != SSL_ERROR_NONE) {
+		if (code == SSL_ERROR_ZERO_RETURN) {
+			received_disconnect();
+			return;
+		}
 		if (DEBUG > 0) {
 			WL_log(std::format("{},{}: SSL {}", ret, code,
 						ERR_error_string(code,
@@ -682,7 +698,9 @@ bool SocketBase::handle_ssl()
 		if (n > 0) {
 			if ((size_t)n == m_write_buffer.size()) {
 				m_write_buffer.clear();
-				if (m_written_cb != nullptr)
+				if (m_sending)
+					m_pending_written = true;
+				else if (m_written_cb != nullptr)
 					(m_target->*m_written_cb)();
 			} else {
 				m_write_buffer = m_write_buffer.substr(n);
@@ -710,12 +728,9 @@ bool SocketBase::handle_ssl()
 		}
 	}
 	// ssl always uses m_read_handle.
-	if (m_read_handle >= 0) {
-		WL_log("remove self");
+	if (m_read_handle >= 0)
 		m_current_loop->remove_io(m_read_handle);
-	}
 	suspend_for_ssl(n);
-	WL_log("done");
 	return false;
 } // }}}
 // }}}
